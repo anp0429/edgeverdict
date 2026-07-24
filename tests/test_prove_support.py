@@ -143,6 +143,87 @@ def test_import_surface_names_the_module_and_public_names(tmp_path):
     assert "_private_fn" not in out and "_hidden" not in out
 
 
+def test_ts_import_surface_extracts_declarations_and_reexports(tmp_path):
+    # catch 6: the TS twin of the python surface (ufo 9 / ohash 7
+    # broken-proposal signature). Entry files are re-export chains, so
+    # the star hop must be followed and type-only names must be kept
+    # out of the runtime list.
+    from agentboard.agents.reviewer_agent import import_surface
+    (tmp_path / "package.json").write_text('{"name": "demo-pkg"}')
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "utils.ts").write_text(
+        "export function helperFn(x: number) { return x }\n"
+        "export const { alpha, beta: renamed } = make()\n"
+        "export interface Shape { x: number }\n"
+        "// export function commentTrap() {}\n"
+    )
+    (src / "index.ts").write_text(
+        "export * from './utils'\n"
+        "export { localThing as publicThing } from './local'\n"
+        "export type { OnlyAType } from './local'\n"
+        "export class Widget {}\n"
+        "export default function main() {}\n"
+    )
+    (src / "local.ts").write_text(
+        "export const localThing = 1\n"
+        "export type OnlyAType = string\n"
+    )
+    out = import_surface(str(tmp_path), "src/index.ts")
+    for name in ("helperFn", "alpha", "renamed", "publicThing",
+                 "Widget", "default"):
+        assert name in out, name
+    assert "commentTrap" not in out
+    assert "demo-pkg" in out
+    # type-only names appear only in the import-type list
+    runtime_part = out.split("Type-only", 1)[0]
+    assert "Shape" not in runtime_part
+    assert "OnlyAType" not in runtime_part
+
+
+def test_ts_import_surface_is_silent_when_nothing_resolves(tmp_path):
+    # silence over a confident wrong answer, same rule as the python side
+    from agentboard.agents.reviewer_agent import import_surface
+    (tmp_path / "empty.ts").write_text("const internal = 1\n")
+    assert import_surface(str(tmp_path), "empty.ts") == ""
+    assert import_surface(str(tmp_path), "missing.ts") == ""
+
+
+def test_import_surface_collects_match_statement_bindings(tmp_path):
+    # defect 26 (board scenario e6ecaf785f9bbc67): the module-scope walk
+    # descended if/try/for/while/with but not match — case-body bindings
+    # and capture patterns are real module globals that persist
+    from agentboard.agents.reviewer_agent import import_surface
+    pkg = tmp_path / "pkg"
+    pkg.mkdir()
+    (pkg / "__init__.py").write_text("")
+    (pkg / "mod.py").write_text(
+        "import sys\n\n"
+        "match sys.platform:\n"
+        "    case 'linux':\n"
+        "        HANDLER = 'epoll'\n"
+        "    case str() as platform_name:\n"
+        "        HANDLER = 'select'\n"
+        "    case [first, *rest]:\n"
+        "        pass\n"
+        "    case {'k': v, **extras}:\n"
+        "        pass\n"
+        "    case _:\n"
+        "        HANDLER = 'poll'\n\n"
+        "def uses_match_inside():\n"
+        "    match 1:\n"
+        "        case leaked:\n"
+        "            pass\n"
+    )
+    out = import_surface(str(tmp_path), "pkg/mod.py")
+    assert "HANDLER" in out
+    assert "platform_name" in out
+    assert "first" in out and "rest" in out
+    assert "v" in out and "extras" in out
+    # a match inside a function opens a new scope: nothing leaks
+    assert "leaked" not in out
+
+
 def test_import_surface_for_package_init_is_the_package(tmp_path):
     from agentboard.agents.reviewer_agent import import_surface
     pkg = tmp_path / "acme"
@@ -153,11 +234,14 @@ def test_import_surface_for_package_init_is_the_package(tmp_path):
     assert "hello" in out
 
 
-def test_import_surface_is_empty_for_non_python_and_unparsable(tmp_path):
+def test_import_surface_is_empty_for_unsupported_and_unparsable(tmp_path):
     from agentboard.agents.reviewer_agent import import_surface
-    (tmp_path / "a.ts").write_text("export const a = 1\n")
+    # .ts stopped being "unsupported" at catch 6 (it has its own
+    # surface now); an actually-unsupported language and broken python
+    # still yield silence
+    (tmp_path / "a.rb").write_text("def a; 1; end\n")
     (tmp_path / "bad.py").write_text("def broken(:\n")
-    assert import_surface(str(tmp_path), "a.ts") == ""
+    assert import_surface(str(tmp_path), "a.rb") == ""
     assert import_surface(str(tmp_path), "bad.py") == ""
 
 

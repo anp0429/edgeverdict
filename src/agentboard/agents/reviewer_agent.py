@@ -25,6 +25,7 @@ from ..providers import chat_completion
 import ast
 import json
 import os
+import re
 
 from ..review import ReviewFinding
 
@@ -100,6 +101,196 @@ Output ONLY JSON:
 ]}}"""
 
 
+_TS_EXTS = (".ts", ".mts", ".cts", ".tsx", ".js", ".mjs", ".cjs", ".jsx")
+
+
+def _ts_binding_names(pattern: str) -> list[str]:
+    """Binding identifiers of a destructuring pattern, best effort.
+    `{a, b: c, d = 1, ...rest}` binds a, c, d, rest; `[x, , y]` binds
+    x, y. Nested patterns recurse. Regex-grade, not a parser — the
+    surface is an aid whose claims must still be true, so unparseable
+    input yields nothing rather than guesses."""
+    inner = pattern.strip()
+    if inner and inner[0] in "{[":
+        inner = inner[1:-1] if inner[-1] in "}]" else inner[1:]
+    out: list[str] = []
+    depth = 0
+    part = ""
+    parts: list[str] = []
+    for ch in inner:
+        if ch in "{[(":
+            depth += 1
+        elif ch in "}])":
+            depth -= 1
+        if ch == "," and depth == 0:
+            parts.append(part)
+            part = ""
+        else:
+            part += ch
+    parts.append(part)
+    for p in parts:
+        p = p.split("=", 1)[0].strip()
+        if not p:
+            continue
+        if p.startswith("..."):
+            p = p[3:].strip()
+        if ":" in p and not p.startswith(("{", "[")):
+            p = p.split(":", 1)[1].strip()
+        if p.startswith(("{", "[")):
+            out.extend(_ts_binding_names(p))
+            continue
+        m = re.match(r"[A-Za-z_$][\w$]*$", p)
+        if m:
+            out.append(p)
+    return out
+
+
+def _ts_strip_comments(text: str) -> str:
+    """Drop block and line comments so `// export function fake` cannot
+    mint a name. String-literal contents can survive, which is why every
+    scan below also anchors `export` at line start."""
+    text = re.sub(r"/\*.*?\*/", "", text, flags=re.S)
+    return re.sub(r"^\s*//.*$", "", text, flags=re.M)
+
+
+def _ts_resolve(base_dir: str, spec: str) -> str:
+    """Resolve a relative re-export specifier to a real file, trying the
+    extension ladder and index files; ESM-style `./x.js` may mean x.ts
+    on disk. Returns "" when nothing exists — a missing hop is dropped,
+    never guessed."""
+    if not spec.startswith("."):
+        return ""
+    stem = os.path.normpath(os.path.join(base_dir, spec))
+    for js_ext in (".js", ".mjs", ".cjs"):
+        if stem.endswith(js_ext):
+            stem = stem[: -len(js_ext)]
+            break
+    candidates = [stem + ext for ext in _TS_EXTS]
+    candidates += [os.path.join(stem, "index" + ext) for ext in _TS_EXTS]
+    if os.path.splitext(stem)[1]:
+        candidates.insert(0, stem)
+    for c in candidates:
+        if os.path.isfile(c):
+            return c
+    return ""
+
+
+def _ts_exports(path: str, visited: set, depth: int) -> tuple:
+    """(value_names, type_names) exported by a TS/JS module, following
+    `export * from` and `export {..} from` up to four hops with a
+    visited set. Entry files like ufo's index.ts are pure re-export
+    chains, so refusing to follow them would return an empty surface for
+    exactly the files that matter most (ufo 9 / ohash 7 broken-proposal
+    signature)."""
+    if depth > 4 or path in visited:
+        return [], []
+    visited.add(path)
+    try:
+        with open(path, encoding="utf-8", errors="replace") as fh:
+            text = _ts_strip_comments(fh.read())
+    except OSError:
+        return [], []
+    values: list[str] = []
+    types: list[str] = []
+
+    def _add(seq: list[str], name: str) -> None:
+        if name and name not in seq:
+            seq.append(name)
+
+    decl = re.compile(
+        r"^\s*export\s+(?:declare\s+)?(default\s+)?"
+        r"(async\s+)?(function\s*\*?|abstract\s+class|class|"
+        r"const\s+enum|enum|interface|type|namespace|const|let|var)\s+"
+        r"([A-Za-z_$][\w$]*)", re.M)
+    for m in decl.finditer(text):
+        is_default, kind, name = m.group(1), m.group(3), m.group(4)
+        kind = re.sub(r"\s+", " ", kind.strip())
+        if is_default:
+            _add(values, "default")
+            continue
+        if kind in ("interface", "type"):
+            _add(types, name)
+        else:
+            _add(values, name)
+    for m in re.finditer(
+            r"^\s*export\s+(?:const|let|var)\s*([{\[])", text, re.M):
+        tail = text[m.end() - 1:]
+        eq = tail.find("=")
+        if eq > 0:
+            for name in _ts_binding_names(tail[:eq]):
+                _add(values, name)
+    if re.search(r"^\s*export\s+default\b", text, re.M):
+        _add(values, "default")
+    braces = re.compile(
+        r"^\s*export\s+(type\s+)?\{([^}]*)\}\s*"
+        r"(?:from\s*['\"]([^'\"]+)['\"])?", re.M)
+    for m in braces.finditer(text):
+        all_types, body, _spec = m.group(1), m.group(2), m.group(3)
+        for item in body.split(","):
+            item = item.strip()
+            if not item:
+                continue
+            item_is_type = bool(all_types)
+            if item.startswith("type "):
+                item_is_type = True
+                item = item[5:].strip()
+            exported = item.split(" as ")[-1].strip()
+            if re.match(r"[A-Za-z_$][\w$]*$", exported):
+                _add(types if item_is_type else values, exported)
+    star = re.compile(
+        r"^\s*export\s*\*\s*(?:as\s+([A-Za-z_$][\w$]*)\s+)?"
+        r"from\s*['\"]([^'\"]+)['\"]", re.M)
+    for m in star.finditer(text):
+        ns, spec = m.group(1), m.group(2)
+        if ns:
+            _add(values, ns)
+            continue
+        hop = _ts_resolve(os.path.dirname(path), spec)
+        if hop:
+            hop_values, hop_types = _ts_exports(hop, visited, depth + 1)
+            for n in hop_values:
+                _add(values, n)
+            for n in hop_types:
+                _add(types, n)
+    return values, types
+
+
+def _ts_import_surface(repo_root: str, target_rel: str) -> str:
+    """Catch 6: the TS-lane twin of the Python surface. The gauntlet
+    measured the cost of its absence — ufo produced 9 broken proposals
+    and ohash 7, one shared signature, tests that never compile because
+    the import path or name was invented. Same contract as the Python
+    side: deterministic facts in the prompt, no judgment, and silence
+    over a confident wrong answer."""
+    path = os.path.join(repo_root, target_rel)
+    values, types = _ts_exports(path, set(), 0)
+    if not values and not types:
+        return ""
+    pkg_line = ""
+    try:
+        import json as _json
+        with open(os.path.join(repo_root, "package.json"),
+                  encoding="utf-8") as fh:
+            pkg_name = _json.load(fh).get("name", "")
+        if pkg_name:
+            pkg_line = (f" The package is `{pkg_name}`; existing tests "
+                        f"show whether they import the package name or a "
+                        f"relative path — copy their style.")
+    except (OSError, ValueError):
+        pass
+    type_line = (f" Type-only names (import type): {', '.join(types)}."
+                 if types else "")
+    listed = ", ".join(values) if values else "(no runtime exports)"
+    return (
+        f"IMPORT SURFACE ({target_rel}) — import the target via a "
+        f"relative path from your test file to this file.{pkg_line} "
+        f"Exported runtime names: {listed}.{type_line} In every proposed "
+        f"test, import ONLY these names from this file; never invent "
+        f"other names, other module paths, or fixtures not defined "
+        f"inside your own test."
+    )
+
+
 def import_surface(repo_root: str, target_rel: str) -> str:
     """Deterministic prompt DATA for Python targets: the module path a test
     must import and the public names that actually exist. Exists because
@@ -107,6 +298,9 @@ def import_surface(repo_root: str, target_rel: str) -> str:
     in agentboard.cli when the real names were public in agentboard.config
     — 33 proposals died of hallucinated imports in one self-review run.
     Facts from the ast, not judgment; the prompt stays repo-agnostic."""
+    if target_rel.endswith((".ts", ".mts", ".cts", ".tsx",
+                            ".js", ".mjs", ".cjs", ".jsx")):
+        return _ts_import_surface(repo_root, target_rel)
     if not target_rel.endswith(".py"):
         return ""
     try:
@@ -231,6 +425,41 @@ def import_surface(repo_root: str, target_rel: str) -> str:
                     _collect(h.body)
                 _collect(node.orelse)
                 _collect(node.finalbody)
+            elif isinstance(node, ast.Match):
+                # defect 26 (board scenario e6ecaf785f9bbc67): a module-
+                # level match binds globals two ways, and both persist
+                # after the statement — capture patterns (`case x:`,
+                # `case Point(x=px):`, `case [*rest]:`, mapping `**rest`)
+                # bind like assignments, and case bodies bind like any
+                # compound body. Walruses in the subject and guards are
+                # already collected by the unconditional scan above.
+                def _pattern_names(p) -> list[str]:
+                    out: list[str] = []
+                    if isinstance(p, ast.MatchAs):
+                        if p.name:
+                            out.append(p.name)
+                        if p.pattern is not None:
+                            out.extend(_pattern_names(p.pattern))
+                    elif isinstance(p, ast.MatchStar):
+                        if p.name:
+                            out.append(p.name)
+                    elif isinstance(p, ast.MatchMapping):
+                        for sub in p.patterns:
+                            out.extend(_pattern_names(sub))
+                        if p.rest:
+                            out.append(p.rest)
+                    elif isinstance(p, (ast.MatchSequence, ast.MatchOr)):
+                        for sub in p.patterns:
+                            out.extend(_pattern_names(sub))
+                    elif isinstance(p, ast.MatchClass):
+                        for sub in [*p.patterns, *p.kwd_patterns]:
+                            out.extend(_pattern_names(sub))
+                    return out
+
+                for case in node.cases:
+                    for nm in _pattern_names(case.pattern):
+                        _bind(nm)
+                    _collect(case.body)
             elif isinstance(node, ast.Delete):
                 # in ORDER, so del-then-rebind keeps the rebind; tuple
                 # forms (`del (A, B)`) remove every contained name
