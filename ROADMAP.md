@@ -124,7 +124,24 @@ rewards, applied to code review. The ladder, cheapest rung first:
 
 ## Where this ends: the whiteboard
 
-The review gate is the first honest citizen of a larger loop: agents that
+An assisted map of every change. For a PR too big to hold in your head, map
+renders the change as a board a reviewer can inhabit: touched modules and their
+import neighborhood laid out as a graph, blast radius computed from edges rather
+than asserted, and every claim pinned to evidence. A confirmed gap hangs on the
+node its test breaks; a covered behavior points at the test that covers it. The
+skeleton is computed from ASTs and import surfaces; a model may annotate prose
+onto structure it cannot alter. The diagram never lies about scope. Review stops
+being a diff read top to bottom and becomes a map walked node by node.
+
+The map is the surface a loop runs on: a gap gets confirmed, a fix agent
+proposes the repair, prove re-runs the same test, and the node flips from red to
+green with both runs pinned to it. The demo's `--fixed` flag is this loop in
+miniature today. Agents collaborate the way reviewers should, on the map instead
+of in a transcript: proposer, critic, repairer, peer reviewer, each leaving
+evidence on nodes, with a human arbitrating the whole change in view. Many
+agents, one map, every claim still executed.
+
+The review gate is the first honest citizen of that loop: agents that
 design small features out loud, on a board, under the same rule the gate
 enforces on tests, lifted one level up. **No argument is admissible without
 evidence attached.** "This API shape is simpler" owes two spike diffs.
