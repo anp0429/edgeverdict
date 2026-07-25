@@ -457,3 +457,20 @@ def test_vitest_merge_preserves_aliases_and_trailing_newline(tmp_path):
     again, _ = h.inject(merged.rsplit("test(\"aliased\"", 1)[0],
                         proposal, host_path=str(host))
     assert again.count('import { alpha as renamed } from "../src";') == 1
+
+
+def test_ts_surface_drops_unresolved_namespace_reexport(tmp_path):
+    # defect 30 (PR #7 board): `export * as ns from './unresolved'` must
+    # contribute no name — same wrong-prompt-fact rule as defect 27, one
+    # branch over (the namespace-alias path)
+    from agentboard.ts_surface import _ts_exports
+    (tmp_path / "here.ts").write_text("export const x = 1;\n")
+    idx = tmp_path / "index.ts"
+    idx.write_text(
+        'export * as missingNs from "./gone";\n'
+        'export * as realNs from "./here";\n'
+        "export function a() {}\n"
+    )
+    values, _types = _ts_exports(str(idx), set(), 0)
+    assert "missingNs" not in values
+    assert "realNs" in values and "a" in values

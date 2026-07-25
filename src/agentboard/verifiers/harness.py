@@ -237,7 +237,7 @@ class VitestHarness(Harness):
         host_imps = parse_es_imports(pristine)
         host_names = bound_import_names(pristine)
         host_specs = {i["spec"] for i in host_imps}
-        spec_for_file = {}
+        spec_for_file: dict[str, str] = {}
         for i in host_imps:
             if i["spec"].startswith("."):
                 r = _ts_resolve(host_dir, i["spec"])

@@ -296,9 +296,12 @@ class FindingVerifier:
             finding.status = "broken_test"
             finding.observed = "could not read test name"
             return finding
+        host_path: str | None = None
+        if self._warm_repo and self.tests_file:
+            host_path = os.path.join(self._warm_repo, self.tests_file)
         injected, err = self.harness.inject(
             self._pristine_tests or "", finding.test_code or "",
-            host_path=os.path.join(self._warm_repo, self.tests_file))
+            host_path=host_path)
         if injected is None:
             finding.status = "broken_test"
             finding.observed = err
@@ -379,6 +382,9 @@ class FindingVerifier:
             return set()
 
         content = self._pristine_tests or ""
+        batch_host_path: str | None = None
+        if self._warm_repo and self.tests_file:
+            batch_host_path = os.path.join(self._warm_repo, self.tests_file)
         marked: dict[int, str] = {}
         for i, f in pending.items():
             title = self.harness.test_title(f.test_code or "")
@@ -393,8 +399,7 @@ class FindingVerifier:
             if code is None:
                 continue
             injected, _err = self.harness.inject(
-                content, code,
-                host_path=os.path.join(self._warm_repo, self.tests_file))
+                content, code, host_path=batch_host_path)
             if injected is None:
                 continue
             content, marked[i] = injected, mark

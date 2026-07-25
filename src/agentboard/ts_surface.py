@@ -162,10 +162,15 @@ def _ts_exports(path: str, visited: set, depth: int) -> tuple:
         r"from\s*['\"]([^'\"]+)['\"]", re.M)
     for m in star.finditer(text):
         ns, spec = m.group(1), m.group(2)
-        if ns:
-            _add(values, ns)
-            continue
         hop = _ts_resolve(os.path.dirname(path), spec)
+        if ns:
+            # defect 30 (PR #7 board): a namespace alias is only real if
+            # its source resolves — same wrong-prompt-fact rule as the
+            # named re-export case (defect 27). Bare package sources
+            # resolve at runtime, so keep those.
+            if hop or not spec.startswith("."):
+                _add(values, ns)
+            continue
         if hop:
             hop_values, hop_types = _ts_exports(hop, visited, depth + 1)
             for n in hop_values:
