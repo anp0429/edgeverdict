@@ -138,6 +138,14 @@ def _ts_exports(path: str, visited: set, depth: int) -> tuple:
         r"(?:from\s*['\"]([^'\"]+)['\"])?", re.M)
     for m in braces.finditer(text):
         all_types, body, _spec = m.group(1), m.group(2), m.group(3)
+        # defect 27 (PR #7 board, blocking class): a re-export from an
+        # unresolvable relative source must contribute nothing — the
+        # target file cannot load at runtime, so vouching for its names
+        # is a wrong prompt fact. Bare package sources stay (they
+        # resolve from node_modules at runtime).
+        if _spec and _spec.startswith(".") and not _ts_resolve(
+                os.path.dirname(path), _spec):
+            continue
         for item in body.split(","):
             item = item.strip()
             if not item:
@@ -193,17 +201,21 @@ def parse_es_imports(code: str) -> list[dict]:
     for m in _ES_IMPORT_RE.finditer(code or ""):
         names: list[str] = []
         body = m.group("named") or m.group("both") or ""
+        pairs: list[tuple] = []
         for item in body.split(","):
             item = item.strip()
             if not item:
                 continue
             if item.startswith("type "):
                 continue
+            exported = item.split(" as ")[0].strip()
             local = item.split(" as ")[-1].strip()
             if re.match(r"[A-Za-z_$][\w$]*$", local):
                 names.append(local)
+                pairs.append((exported, local))
         out.append({
             "names": names,
+            "pairs": pairs,
             "default": m.group("default"),
             "namespace": m.group("ns"),
             "spec": m.group("spec"),

@@ -255,8 +255,17 @@ class VitestHarness(Harness):
                 use_spec = spec_for_file.get(resolved, spec)
                 vals, _types = _ts_exports(resolved, set(), 0)
                 allowed = set(vals)
-                named = [n for n in imp["names"]
-                         if n not in host_names and n in allowed]
+                # defect 28: aliased imports merge as `exported as local`,
+                # verified against the EXPORTED name (the local alias never
+                # appears on the export surface by construction)
+                named = []
+                for exported, local in imp.get("pairs",
+                                               [(n, n) for n in imp["names"]]):
+                    if local in host_names or exported not in allowed:
+                        continue
+                    named.append(local if exported == local
+                                 else f"{exported} as {local}")
+                    host_names.add(local)
                 if imp["default"] and imp["default"] not in host_names                         and "default" in allowed:
                     lines.append(f'import {imp["default"]} from "{use_spec}";')
                     host_names.add(imp["default"])
@@ -272,12 +281,16 @@ class VitestHarness(Harness):
             if named:
                 lines.append(
                     f'import {{ {", ".join(named)} }} from "{use_spec}";')
-                host_names.update(named)
+                host_names.update(n.split(" as ")[-1] for n in named)
         if not lines:
             return pristine
         split = pristine.splitlines()
         at = self._import_header_end(pristine)
-        return "\n".join(split[:at] + lines + split[at:])
+        merged = "\n".join(split[:at] + lines + split[at:])
+        # defect 29: splitlines/join eats a trailing newline; keep it
+        if pristine.endswith("\n") and not merged.endswith("\n"):
+            merged += "\n"
+        return merged
 
     def strip_imports(self, test_code: str, pristine: str = "") -> str:
         """Remove module-level import statements from proposed test code.

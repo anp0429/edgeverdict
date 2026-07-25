@@ -409,3 +409,51 @@ def test_vitest_inject_merges_needed_imports(tmp_path):
     plain, _ = h.inject(host.read_text(), proposal)
     assert "beta" not in "\n".join(
         ln for ln in plain.splitlines() if ln.startswith("import"))
+
+
+def test_ts_surface_drops_unresolved_reexport_sources(tmp_path):
+    # defect 27 (PR #7 board, blocking class): a dangling relative
+    # re-export must contribute no names — the module cannot load, so
+    # the surface vouching for it is a wrong prompt fact
+    from agentboard.ts_surface import _ts_exports
+    (tmp_path / "here.ts").write_text("export const real = 1;\n")
+    idx = tmp_path / "index.ts"
+    idx.write_text(
+        'export { ghost } from "./missing";\n'
+        'export { real } from "./here";\n'
+        "export function alpha() {}\n"
+    )
+    values, _types = _ts_exports(str(idx), set(), 0)
+    assert "ghost" not in values
+    assert "real" in values and "alpha" in values
+
+
+def test_vitest_merge_preserves_aliases_and_trailing_newline(tmp_path):
+    # defects 28 + 29 (PR #7 board): aliased imports merge as
+    # `exported as local` verified against the exported name, and the
+    # merged file keeps its trailing newline so re-merge is idempotent
+    from agentboard.verifiers.harness import VitestHarness
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "index.ts").write_text("export function alpha() {}\n")
+    tdir = tmp_path / "test"
+    tdir.mkdir()
+    host = tdir / "index.test.ts"
+    host.write_text(
+        'import { test, expect } from "vitest";\n\n'
+        'test("host", () => { expect(1).toBe(1); });\n'
+    )
+    proposal = (
+        'import { alpha as renamed, nothere as ghost } from "../src";\n'
+        'test("aliased", () => { expect(renamed).toBeTruthy(); });'
+    )
+    h = VitestHarness()
+    merged, err = h.inject(host.read_text(), proposal,
+                           host_path=str(host))
+    assert merged, err
+    assert 'import { alpha as renamed } from "../src";' in merged
+    assert "ghost" not in merged
+    assert merged.endswith("\n") or merged.endswith("});")
+    again, _ = h.inject(merged.rsplit("test(\"aliased\"", 1)[0],
+                        proposal, host_path=str(host))
+    assert again.count('import { alpha as renamed } from "../src";') == 1
