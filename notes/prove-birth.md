@@ -144,22 +144,70 @@ a live false-positive generator and is now fixed the same way:
 classification by the error in raising position, with the crash-that-
 quotes-"AssertionError" case as a permanent test.
 
+## The second language (PR #7, fingerprints below)
+
+Weeks later, `prove` grew a TypeScript lane, and the same machine that
+gated its birth gated its growth six more times. Catch 6 built a TS
+export-surface extractor to match the Python one; the after-measurement
+came back worse, not better, which overturned its own premise: the ufo/
+ohash broken-proposal class was never invented imports; it was
+stripped-but-needed ones. The vitest harness removes proposal imports
+by design, and the routed host file did not bind the name. Catch 6b
+fixed it by merging verified imports into the host header instead of
+dropping them, proven by executing a real proposal inside the real ufo
+repo. That measurement, run to produce a launch number, debugged the
+feature before it could ship a false improvement.
+
+Then self-review found six more, defects 26 through 31, board by board:
+
+- 26: the Python module-scope walker descended every compound statement
+  except `match`, so case-body bindings and capture patterns were
+  invisible. (Fingerprint e6ecaf785f9bbc67, from the earlier PR #6
+  board; fixed here.)
+- 27: the TS surface added names from `export { x } from './missing'`
+  without resolving the source. A re-export from a module that cannot
+  load is a name that cannot be imported. A wrong prompt fact, the first
+  blocking-class gap the gate ever raised against its own code.
+- 28: aliased proposal imports (`import { a as b }`) could never merge,
+  because the parser kept only the local name and verified the wrong
+  side against the export surface.
+- 29: the import merge ate the host file's trailing newline, making a
+  re-merge non-idempotent.
+- 30: the same unresolved-source lie as 27, one branch over: a
+  namespace star re-export (`export * as ns from './missing'`) added
+  `ns` unconditionally.
+- 31: an ambient `export declare namespace X {}` leaked into runtime
+  importable names, though it emits no runtime binding; the extractor
+  ignored the `declare` modifier.
+
+Two of these were non-test guardrails doing the same job: the CI
+typecheck blocked the merge on three mypy errors in the new code,
+caught before a human looked. Self-review kept going past
+the shapes real repos ship, into exotic re-export corners the regex-grade
+extractor does not yet handle; those are logged in
+notes/ts-surface-limits.md rather than fixed, by the same rule, because
+the surface is an aid to the proposer and can only weaken a proposal,
+never manufacture a false gap. The merge was ruled by that rule, not by
+chasing the board to empty.
+
 ## The ledger
 
-Twenty-five real defects found by the tool in and around its own code
-across five self-review rounds in two days, plus one latent twin the
-tool taught us to grep for. Broken proposals went 33, 29, 0, 0, 0 as
-the rounds taught the proposer its own repo. Every defect is a named
-test in the suite.
+Thirty-one real defects found by the tool in and around its own code
+across the birth of `prove` and the growth of its TypeScript lane, plus
+one latent twin the tool taught us to grep for. Broken proposals went
+33, 29, 0, 0, 0 as the first rounds taught the proposer its own repo,
+and the TS lane's import-caused broken class went 9 to 0 once the merge
+landed. Every defect is a named test in the suite.
 
-Severity, for the skeptic, because "25 bugs" flattens a distribution
-that shouldn't be flattened: six were verdict-path or evidence-integrity
-defects — the two substring classifiers (a false-positive generator in
+Severity, for the skeptic, because "31 bugs" flattens a distribution
+that shouldn't be flattened: seven were verdict-path or evidence-
+integrity or wrong-prompt-fact defects — the two substring classifiers (a false-positive generator in
 each harness), injection silently rewriting test bodies, title
 extraction selecting the wrong test for serial execution, STOPPED
-exiting 0, and a mid-run failure discarding executed evidence. Those
-are the ones that matter, they predate the week, and they are why this
-tool exists. The rest are completeness misses in a prompt aid that was
+exiting 0, a mid-run failure discarding executed evidence, and the
+unresolved-source export lie (defect 27) that would have told a proposer
+to import a name no module exports. Those are the ones that matter, and
+they are why this tool exists. The rest are completeness misses in a prompt aid that was
 days old when reviewed — real, fixed, and labeled advisory by our own
 merge policy. A fair reading of this ledger is: the tool found six
 serious defects in its own honesty machinery and then relentlessly
