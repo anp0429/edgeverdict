@@ -143,6 +143,87 @@ def test_import_surface_names_the_module_and_public_names(tmp_path):
     assert "_private_fn" not in out and "_hidden" not in out
 
 
+def test_ts_import_surface_extracts_declarations_and_reexports(tmp_path):
+    # catch 6: the TS twin of the python surface (ufo 9 / ohash 7
+    # broken-proposal signature). Entry files are re-export chains, so
+    # the star hop must be followed and type-only names must be kept
+    # out of the runtime list.
+    from agentboard.agents.reviewer_agent import import_surface
+    (tmp_path / "package.json").write_text('{"name": "demo-pkg"}')
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "utils.ts").write_text(
+        "export function helperFn(x: number) { return x }\n"
+        "export const { alpha, beta: renamed } = make()\n"
+        "export interface Shape { x: number }\n"
+        "// export function commentTrap() {}\n"
+    )
+    (src / "index.ts").write_text(
+        "export * from './utils'\n"
+        "export { localThing as publicThing } from './local'\n"
+        "export type { OnlyAType } from './local'\n"
+        "export class Widget {}\n"
+        "export default function main() {}\n"
+    )
+    (src / "local.ts").write_text(
+        "export const localThing = 1\n"
+        "export type OnlyAType = string\n"
+    )
+    out = import_surface(str(tmp_path), "src/index.ts")
+    for name in ("helperFn", "alpha", "renamed", "publicThing",
+                 "Widget", "default"):
+        assert name in out, name
+    assert "commentTrap" not in out
+    assert "demo-pkg" in out
+    # type-only names appear only in the import-type list
+    runtime_part = out.split("Type-only", 1)[0]
+    assert "Shape" not in runtime_part
+    assert "OnlyAType" not in runtime_part
+
+
+def test_ts_import_surface_is_silent_when_nothing_resolves(tmp_path):
+    # silence over a confident wrong answer, same rule as the python side
+    from agentboard.agents.reviewer_agent import import_surface
+    (tmp_path / "empty.ts").write_text("const internal = 1\n")
+    assert import_surface(str(tmp_path), "empty.ts") == ""
+    assert import_surface(str(tmp_path), "missing.ts") == ""
+
+
+def test_import_surface_collects_match_statement_bindings(tmp_path):
+    # defect 26 (board scenario e6ecaf785f9bbc67): the module-scope walk
+    # descended if/try/for/while/with but not match — case-body bindings
+    # and capture patterns are real module globals that persist
+    from agentboard.agents.reviewer_agent import import_surface
+    pkg = tmp_path / "pkg"
+    pkg.mkdir()
+    (pkg / "__init__.py").write_text("")
+    (pkg / "mod.py").write_text(
+        "import sys\n\n"
+        "match sys.platform:\n"
+        "    case 'linux':\n"
+        "        HANDLER = 'epoll'\n"
+        "    case str() as platform_name:\n"
+        "        HANDLER = 'select'\n"
+        "    case [first, *rest]:\n"
+        "        pass\n"
+        "    case {'k': v, **extras}:\n"
+        "        pass\n"
+        "    case _:\n"
+        "        HANDLER = 'poll'\n\n"
+        "def uses_match_inside():\n"
+        "    match 1:\n"
+        "        case leaked:\n"
+        "            pass\n"
+    )
+    out = import_surface(str(tmp_path), "pkg/mod.py")
+    assert "HANDLER" in out
+    assert "platform_name" in out
+    assert "first" in out and "rest" in out
+    assert "v" in out and "extras" in out
+    # a match inside a function opens a new scope: nothing leaks
+    assert "leaked" not in out
+
+
 def test_import_surface_for_package_init_is_the_package(tmp_path):
     from agentboard.agents.reviewer_agent import import_surface
     pkg = tmp_path / "acme"
@@ -153,11 +234,14 @@ def test_import_surface_for_package_init_is_the_package(tmp_path):
     assert "hello" in out
 
 
-def test_import_surface_is_empty_for_non_python_and_unparsable(tmp_path):
+def test_import_surface_is_empty_for_unsupported_and_unparsable(tmp_path):
     from agentboard.agents.reviewer_agent import import_surface
-    (tmp_path / "a.ts").write_text("export const a = 1\n")
+    # .ts stopped being "unsupported" at catch 6 (it has its own
+    # surface now); an actually-unsupported language and broken python
+    # still yield silence
+    (tmp_path / "a.rb").write_text("def a; 1; end\n")
     (tmp_path / "bad.py").write_text("def broken(:\n")
-    assert import_surface(str(tmp_path), "a.ts") == ""
+    assert import_surface(str(tmp_path), "a.rb") == ""
     assert import_surface(str(tmp_path), "bad.py") == ""
 
 
@@ -277,3 +361,135 @@ def test_import_surface_round_six_regressions(tmp_path):
         assert name in out
     for name in ("A", "B", "boom"):
         assert f" {name}," not in out and f" {name}." not in out
+
+
+def test_vitest_inject_merges_needed_imports(tmp_path):
+    # catch 6b: the ufo 9 / ohash 7 class was stripped-but-needed imports.
+    # The merge keeps only names the target's real export surface vouches
+    # for, dedupes what the host already binds, and lands after the last
+    # host import.
+    from agentboard.verifiers.harness import VitestHarness
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "index.ts").write_text(
+        "export function alpha() {}\n"
+        "export function beta() {}\n"
+        "export type OnlyType = string\n"
+    )
+    tdir = tmp_path / "test"
+    tdir.mkdir()
+    host = tdir / "index.test.ts"
+    host.write_text(
+        'import { describe, expect, test } from "vitest";\n'
+        'import { alpha } from "../src";\n\n'
+        'test("host", () => { expect(alpha).toBeTruthy(); });\n'
+    )
+    proposal = (
+        'import { alpha, beta, invented } from "../src/index.ts";\n'
+        'import type { OnlyType } from "../src";\n'
+        'import { vi } from "vitest";\n'
+        'import { ghost } from "./does-not-exist";\n'
+        'test("merged", () => { expect(beta).toBeTruthy(); });'
+    )
+    h = VitestHarness()
+    merged, err = h.inject(host.read_text(), proposal,
+                           host_path=str(host))
+    assert merged, err
+    lines = merged.splitlines()
+    assert 'import { beta } from "../src";' in lines  # host specifier reused
+    assert sum("beta" in ln and "import" in ln for ln in lines) == 1
+    assert "invented" not in merged          # not exported -> dropped
+    assert "OnlyType" not in merged          # type-only -> dropped
+    assert 'import { vi } from "vitest";' in lines  # bare, host has module
+    assert "does-not-exist" not in merged    # unresolvable -> dropped
+    # merge lands in the import header, before any test
+    assert lines.index('import { beta } from "../src";') \
+        < lines.index('test("host", () => { expect(alpha).toBeTruthy(); });')
+    # and without host_path, behavior is the old strip (no merge)
+    plain, _ = h.inject(host.read_text(), proposal)
+    assert "beta" not in "\n".join(
+        ln for ln in plain.splitlines() if ln.startswith("import"))
+
+
+def test_ts_surface_drops_unresolved_reexport_sources(tmp_path):
+    # defect 27 (PR #7 board, blocking class): a dangling relative
+    # re-export must contribute no names — the module cannot load, so
+    # the surface vouching for it is a wrong prompt fact
+    from agentboard.ts_surface import _ts_exports
+    (tmp_path / "here.ts").write_text("export const real = 1;\n")
+    idx = tmp_path / "index.ts"
+    idx.write_text(
+        'export { ghost } from "./missing";\n'
+        'export { real } from "./here";\n'
+        "export function alpha() {}\n"
+    )
+    values, _types = _ts_exports(str(idx), set(), 0)
+    assert "ghost" not in values
+    assert "real" in values and "alpha" in values
+
+
+def test_vitest_merge_preserves_aliases_and_trailing_newline(tmp_path):
+    # defects 28 + 29 (PR #7 board): aliased imports merge as
+    # `exported as local` verified against the exported name, and the
+    # merged file keeps its trailing newline so re-merge is idempotent
+    from agentboard.verifiers.harness import VitestHarness
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "index.ts").write_text("export function alpha() {}\n")
+    tdir = tmp_path / "test"
+    tdir.mkdir()
+    host = tdir / "index.test.ts"
+    host.write_text(
+        'import { test, expect } from "vitest";\n\n'
+        'test("host", () => { expect(1).toBe(1); });\n'
+    )
+    proposal = (
+        'import { alpha as renamed, nothere as ghost } from "../src";\n'
+        'test("aliased", () => { expect(renamed).toBeTruthy(); });'
+    )
+    h = VitestHarness()
+    merged, err = h.inject(host.read_text(), proposal,
+                           host_path=str(host))
+    assert merged, err
+    assert 'import { alpha as renamed } from "../src";' in merged
+    assert "ghost" not in merged
+    assert merged.endswith("\n") or merged.endswith("});")
+    again, _ = h.inject(merged.rsplit("test(\"aliased\"", 1)[0],
+                        proposal, host_path=str(host))
+    assert again.count('import { alpha as renamed } from "../src";') == 1
+
+
+def test_ts_surface_drops_unresolved_namespace_reexport(tmp_path):
+    # defect 30 (PR #7 board): `export * as ns from './unresolved'` must
+    # contribute no name — same wrong-prompt-fact rule as defect 27, one
+    # branch over (the namespace-alias path)
+    from agentboard.ts_surface import _ts_exports
+    (tmp_path / "here.ts").write_text("export const x = 1;\n")
+    idx = tmp_path / "index.ts"
+    idx.write_text(
+        'export * as missingNs from "./gone";\n'
+        'export * as realNs from "./here";\n'
+        "export function a() {}\n"
+    )
+    values, _types = _ts_exports(str(idx), set(), 0)
+    assert "missingNs" not in values
+    assert "realNs" in values and "a" in values
+
+
+def test_ts_surface_declare_namespace_is_type_only(tmp_path):
+    # defect 31 (PR #7 board): `export declare namespace` is an ambient
+    # type-only declaration with no runtime binding — it must not be
+    # advertised as runtime-importable. declare const/function still
+    # describe real runtime values; plain namespace is runtime.
+    from agentboard.ts_surface import _ts_exports
+    m = tmp_path / "m.ts"
+    m.write_text(
+        "export declare namespace ONLY_FOR_TYPES {}\n"
+        "export declare const REAL: number;\n"
+        "export declare function fn(): void;\n"
+        "export namespace RuntimeNs { export const y = 1 }\n"
+    )
+    values, types = _ts_exports(str(m), set(), 0)
+    assert "ONLY_FOR_TYPES" not in values
+    assert "ONLY_FOR_TYPES" in types
+    assert "REAL" in values and "fn" in values and "RuntimeNs" in values

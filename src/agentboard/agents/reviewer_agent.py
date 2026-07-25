@@ -27,6 +27,7 @@ import json
 import os
 
 from ..review import ReviewFinding
+from ..ts_surface import _ts_exports
 
 # Review axes bias WHICH cases the reviewer enumerates, injected as data so the
 # base prompt stays generic (same no-shape-hints, no-failure-bias rules apply).
@@ -100,6 +101,44 @@ Output ONLY JSON:
 ]}}"""
 
 
+def _ts_import_surface(repo_root: str, target_rel: str) -> str:
+    """Catch 6: the TS-lane twin of the Python surface. The gauntlet
+    measured the cost of its absence — ufo produced 9 broken proposals
+    and ohash 7, one shared signature, tests that never compile because
+    the import path or name was invented. Same contract as the Python
+    side: deterministic facts in the prompt, no judgment, and silence
+    over a confident wrong answer."""
+    path = os.path.join(repo_root, target_rel)
+    values, types = _ts_exports(path, set(), 0)
+    if not values and not types:
+        return ""
+    pkg_line = ""
+    try:
+        import json as _json
+        with open(os.path.join(repo_root, "package.json"),
+                  encoding="utf-8") as fh:
+            pkg_name = _json.load(fh).get("name", "")
+        if pkg_name:
+            pkg_line = (f" The package is `{pkg_name}`; existing tests "
+                        f"show whether they import the package name or a "
+                        f"relative path — copy their style.")
+    except (OSError, ValueError):
+        pass
+    type_line = (f" Type-only names (import type): {', '.join(types)}."
+                 if types else "")
+    listed = ", ".join(values) if values else "(no runtime exports)"
+    return (
+        f"IMPORT SURFACE ({target_rel}) — import the target via a "
+        f"relative path from your test file to this file.{pkg_line} "
+        f"Exported runtime names: {listed}.{type_line} Import the names "
+        f"you need from this file with a normal import statement; the "
+        f"harness merges your imports into the host tests file and drops "
+        f"any name this file does not actually export. Never invent "
+        f"names, and never rely on fixtures not defined inside your own "
+        f"test."
+    )
+
+
 def import_surface(repo_root: str, target_rel: str) -> str:
     """Deterministic prompt DATA for Python targets: the module path a test
     must import and the public names that actually exist. Exists because
@@ -107,6 +146,9 @@ def import_surface(repo_root: str, target_rel: str) -> str:
     in agentboard.cli when the real names were public in agentboard.config
     — 33 proposals died of hallucinated imports in one self-review run.
     Facts from the ast, not judgment; the prompt stays repo-agnostic."""
+    if target_rel.endswith((".ts", ".mts", ".cts", ".tsx",
+                            ".js", ".mjs", ".cjs", ".jsx")):
+        return _ts_import_surface(repo_root, target_rel)
     if not target_rel.endswith(".py"):
         return ""
     try:
@@ -231,6 +273,41 @@ def import_surface(repo_root: str, target_rel: str) -> str:
                     _collect(h.body)
                 _collect(node.orelse)
                 _collect(node.finalbody)
+            elif isinstance(node, ast.Match):
+                # defect 26 (board scenario e6ecaf785f9bbc67): a module-
+                # level match binds globals two ways, and both persist
+                # after the statement — capture patterns (`case x:`,
+                # `case Point(x=px):`, `case [*rest]:`, mapping `**rest`)
+                # bind like assignments, and case bodies bind like any
+                # compound body. Walruses in the subject and guards are
+                # already collected by the unconditional scan above.
+                def _pattern_names(p) -> list[str]:
+                    out: list[str] = []
+                    if isinstance(p, ast.MatchAs):
+                        if p.name:
+                            out.append(p.name)
+                        if p.pattern is not None:
+                            out.extend(_pattern_names(p.pattern))
+                    elif isinstance(p, ast.MatchStar):
+                        if p.name:
+                            out.append(p.name)
+                    elif isinstance(p, ast.MatchMapping):
+                        for sub in p.patterns:
+                            out.extend(_pattern_names(sub))
+                        if p.rest:
+                            out.append(p.rest)
+                    elif isinstance(p, (ast.MatchSequence, ast.MatchOr)):
+                        for sub in p.patterns:
+                            out.extend(_pattern_names(sub))
+                    elif isinstance(p, ast.MatchClass):
+                        for sub in [*p.patterns, *p.kwd_patterns]:
+                            out.extend(_pattern_names(sub))
+                    return out
+
+                for case in node.cases:
+                    for nm in _pattern_names(case.pattern):
+                        _bind(nm)
+                    _collect(case.body)
             elif isinstance(node, ast.Delete):
                 # in ORDER, so del-then-rebind keeps the rebind; tuple
                 # forms (`del (A, B)`) remove every contained name

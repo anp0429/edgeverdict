@@ -69,7 +69,8 @@ class Harness(ABC):
     result_file: str = ""
 
     @abstractmethod
-    def inject(self, pristine: str, test_code: str) -> tuple[str | None, str]:
+    def inject(self, pristine: str, test_code: str,
+               host_path: str | None = None) -> tuple[str | None, str]:
         """Proposal code into the pristine tests-file content (PURE).
         Returns (new_content, "") or (None, reason)."""
 
@@ -143,7 +144,8 @@ class VitestHarness(Harness):
     src_suffixes = (".ts", ".tsx", ".js", ".jsx", ".mjs")
     result_file = "agentboard-finding-result.json"
 
-    def inject(self, pristine: str, test_code: str) -> tuple[str | None, str]:
+    def inject(self, pristine: str, test_code: str,
+               host_path: str | None = None) -> tuple[str | None, str]:
         """Inject the agent's test into the pristine tests-file content (PURE).
 
         Works on the pristine content in memory (not the file on disk) so the warm
@@ -175,6 +177,12 @@ class VitestHarness(Harness):
         code = self.strip_imports(test_code, pristine).rstrip()
         if not code:
             return None, "test contained only imports"
+        if host_path:
+            # catch 6b: bindings the proposal imported and the host lacks
+            # are merged into the host's import header (verified against
+            # the target's real export surface) instead of being lost to
+            # strip_imports -> ReferenceError (ufo 9 / ohash 7 class).
+            pristine = self._merge_imports(pristine, test_code, host_path)
         openers = re.findall(r"^(describe|test|it)\b", pristine, flags=re.M)
         if openers and openers[-1] == "describe":
             tail = pristine.rstrip()
@@ -190,6 +198,100 @@ class VitestHarness(Harness):
             return pristine[:idx] + "\n\n" + code + "\n" + pristine[idx:], ""
         return pristine.rstrip() + "\n\n" + code + "\n", ""
 
+
+    def _import_header_end(self, pristine: str) -> int:
+        """Index of the line AFTER the last top-level import in ``pristine``."""
+        end, skipping = 0, False
+        for i, line in enumerate(pristine.splitlines()):
+            s = line.strip()
+            if skipping:
+                if s.endswith(";") or s.endswith('"') or s.endswith("'"):
+                    skipping = False
+                    end = i + 1
+                continue
+            if s.startswith("import ") or s.startswith("import{"):
+                if s.endswith(";") or (" from " in s and s[-1] in "\"';"):
+                    end = i + 1
+                else:
+                    skipping = " from " not in s
+                    if not skipping:
+                        end = i + 1
+        return end
+
+    def _merge_imports(self, pristine: str, test_code: str,
+                       host_path: str) -> str:
+        """Catch 6b. Deterministic, no model: collect the bindings the
+        proposal tried to import, keep only names the resolved module's
+        real export surface vouches for and the host does not already
+        bind, and insert one import line per specifier after the host's
+        last import. Relative specifiers resolve from the host file's
+        directory and prefer the host's own specifier for the same file;
+        bare specifiers merge only when the host already imports that
+        module verbatim (its presence is proven, its surface is not
+        cheaply checkable). Anything unverifiable is dropped — the old
+        ReferenceError is strictly better than a transform error that
+        poisons the whole file."""
+        from ..ts_surface import (_ts_exports, _ts_resolve,
+                                  bound_import_names, parse_es_imports)
+        host_dir = os.path.dirname(host_path)
+        host_imps = parse_es_imports(pristine)
+        host_names = bound_import_names(pristine)
+        host_specs = {i["spec"] for i in host_imps}
+        spec_for_file: dict[str, str] = {}
+        for i in host_imps:
+            if i["spec"].startswith("."):
+                r = _ts_resolve(host_dir, i["spec"])
+                if r:
+                    spec_for_file.setdefault(r, i["spec"])
+        lines: list[str] = []
+        for imp in parse_es_imports(test_code):
+            if imp["is_type"]:
+                continue
+            spec = imp["spec"]
+            if spec.startswith("."):
+                resolved = _ts_resolve(host_dir, spec)
+                if not resolved:
+                    continue
+                use_spec = spec_for_file.get(resolved, spec)
+                vals, _types = _ts_exports(resolved, set(), 0)
+                allowed = set(vals)
+                # defect 28: aliased imports merge as `exported as local`,
+                # verified against the EXPORTED name (the local alias never
+                # appears on the export surface by construction)
+                named = []
+                for exported, local in imp.get("pairs",
+                                               [(n, n) for n in imp["names"]]):
+                    if local in host_names or exported not in allowed:
+                        continue
+                    named.append(local if exported == local
+                                 else f"{exported} as {local}")
+                    host_names.add(local)
+                if imp["default"] and imp["default"] not in host_names                         and "default" in allowed:
+                    lines.append(f'import {imp["default"]} from "{use_spec}";')
+                    host_names.add(imp["default"])
+                if imp["namespace"] and imp["namespace"] not in host_names:
+                    lines.append(
+                        f'import * as {imp["namespace"]} from "{use_spec}";')
+                    host_names.add(imp["namespace"])
+            else:
+                if spec not in host_specs:
+                    continue
+                use_spec = spec
+                named = [n for n in imp["names"] if n not in host_names]
+            if named:
+                lines.append(
+                    f'import {{ {", ".join(named)} }} from "{use_spec}";')
+                host_names.update(n.split(" as ")[-1] for n in named)
+        if not lines:
+            return pristine
+        split = pristine.splitlines()
+        at = self._import_header_end(pristine)
+        merged = "\n".join(split[:at] + lines + split[at:])
+        # defect 29: splitlines/join eats a trailing newline; keep it
+        if pristine.endswith("\n") and not merged.endswith("\n"):
+            merged += "\n"
+        return merged
+
     def strip_imports(self, test_code: str, pristine: str = "") -> str:
         """Remove module-level import statements from proposed test code.
 
@@ -198,6 +300,10 @@ class VitestHarness(Harness):
         carries its own imports fails the whole file's transform (three findings
         died this way against zod). The harness rule already tells the proposer
         to reuse the host file's imports; stripping enforces it mechanically.
+        Since catch 6b, stripping is half the contract: inject() first
+        merges needed-and-verified bindings into the host's import header,
+        so a stripped import is only lost when the export surface could
+        not vouch for it.
         If a stripped import was genuinely needed, the test fails at runtime with
         a clear ReferenceError — still a correct broken_test, instead of a
         transform failure that poisons the batch.
