@@ -361,3 +361,51 @@ def test_import_surface_round_six_regressions(tmp_path):
         assert name in out
     for name in ("A", "B", "boom"):
         assert f" {name}," not in out and f" {name}." not in out
+
+
+def test_vitest_inject_merges_needed_imports(tmp_path):
+    # catch 6b: the ufo 9 / ohash 7 class was stripped-but-needed imports.
+    # The merge keeps only names the target's real export surface vouches
+    # for, dedupes what the host already binds, and lands after the last
+    # host import.
+    from agentboard.verifiers.harness import VitestHarness
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "index.ts").write_text(
+        "export function alpha() {}\n"
+        "export function beta() {}\n"
+        "export type OnlyType = string\n"
+    )
+    tdir = tmp_path / "test"
+    tdir.mkdir()
+    host = tdir / "index.test.ts"
+    host.write_text(
+        'import { describe, expect, test } from "vitest";\n'
+        'import { alpha } from "../src";\n\n'
+        'test("host", () => { expect(alpha).toBeTruthy(); });\n'
+    )
+    proposal = (
+        'import { alpha, beta, invented } from "../src/index.ts";\n'
+        'import type { OnlyType } from "../src";\n'
+        'import { vi } from "vitest";\n'
+        'import { ghost } from "./does-not-exist";\n'
+        'test("merged", () => { expect(beta).toBeTruthy(); });'
+    )
+    h = VitestHarness()
+    merged, err = h.inject(host.read_text(), proposal,
+                           host_path=str(host))
+    assert merged, err
+    lines = merged.splitlines()
+    assert 'import { beta } from "../src";' in lines  # host specifier reused
+    assert sum("beta" in ln and "import" in ln for ln in lines) == 1
+    assert "invented" not in merged          # not exported -> dropped
+    assert "OnlyType" not in merged          # type-only -> dropped
+    assert 'import { vi } from "vitest";' in lines  # bare, host has module
+    assert "does-not-exist" not in merged    # unresolvable -> dropped
+    # merge lands in the import header, before any test
+    assert lines.index('import { beta } from "../src";') \
+        < lines.index('test("host", () => { expect(alpha).toBeTruthy(); });')
+    # and without host_path, behavior is the old strip (no merge)
+    plain, _ = h.inject(host.read_text(), proposal)
+    assert "beta" not in "\n".join(
+        ln for ln in plain.splitlines() if ln.startswith("import"))

@@ -62,7 +62,8 @@ class PytestHarness(Harness):
 
     # ---- injection ---------------------------------------------------------
 
-    def inject(self, pristine: str, test_code: str) -> tuple[str | None, str]:
+    def inject(self, pristine: str, test_code: str,
+               host_path: str | None = None) -> tuple[str | None, str]:
         """EOF-append at module level (PURE, mirrors the vitest contract).
         Two blank lines keep the file PEP8-shaped; nothing depends on it."""
         if not test_code:

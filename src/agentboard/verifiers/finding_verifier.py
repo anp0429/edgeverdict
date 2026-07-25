@@ -296,8 +296,9 @@ class FindingVerifier:
             finding.status = "broken_test"
             finding.observed = "could not read test name"
             return finding
-        injected, err = self.harness.inject(self._pristine_tests or "",
-                                            finding.test_code or "")
+        injected, err = self.harness.inject(
+            self._pristine_tests or "", finding.test_code or "",
+            host_path=os.path.join(self._warm_repo, self.tests_file))
         if injected is None:
             finding.status = "broken_test"
             finding.observed = err
@@ -391,7 +392,9 @@ class FindingVerifier:
                 self._MARK_RE.sub("", f.test_code or ""), mark)
             if code is None:
                 continue
-            injected, _err = self.harness.inject(content, code)
+            injected, _err = self.harness.inject(
+                content, code,
+                host_path=os.path.join(self._warm_repo, self.tests_file))
             if injected is None:
                 continue
             content, marked[i] = injected, mark
