@@ -474,3 +474,22 @@ def test_ts_surface_drops_unresolved_namespace_reexport(tmp_path):
     values, _types = _ts_exports(str(idx), set(), 0)
     assert "missingNs" not in values
     assert "realNs" in values and "a" in values
+
+
+def test_ts_surface_declare_namespace_is_type_only(tmp_path):
+    # defect 31 (PR #7 board): `export declare namespace` is an ambient
+    # type-only declaration with no runtime binding — it must not be
+    # advertised as runtime-importable. declare const/function still
+    # describe real runtime values; plain namespace is runtime.
+    from agentboard.ts_surface import _ts_exports
+    m = tmp_path / "m.ts"
+    m.write_text(
+        "export declare namespace ONLY_FOR_TYPES {}\n"
+        "export declare const REAL: number;\n"
+        "export declare function fn(): void;\n"
+        "export namespace RuntimeNs { export const y = 1 }\n"
+    )
+    values, types = _ts_exports(str(m), set(), 0)
+    assert "ONLY_FOR_TYPES" not in values
+    assert "ONLY_FOR_TYPES" in types
+    assert "REAL" in values and "fn" in values and "RuntimeNs" in values

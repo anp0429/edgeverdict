@@ -110,17 +110,23 @@ def _ts_exports(path: str, visited: set, depth: int) -> tuple:
             seq.append(name)
 
     decl = re.compile(
-        r"^\s*export\s+(?:declare\s+)?(default\s+)?"
+        r"^\s*export\s+(declare\s+)?(default\s+)?"
         r"(async\s+)?(function\s*\*?|abstract\s+class|class|"
         r"const\s+enum|enum|interface|type|namespace|const|let|var)\s+"
         r"([A-Za-z_$][\w$]*)", re.M)
     for m in decl.finditer(text):
-        is_default, kind, name = m.group(1), m.group(3), m.group(4)
+        is_declare, is_default = m.group(1), m.group(2)
+        kind, name = m.group(4), m.group(5)
         kind = re.sub(r"\s+", " ", kind.strip())
         if is_default:
             _add(values, "default")
             continue
-        if kind in ("interface", "type"):
+        # defect 31 (PR #7 board): a `declare namespace` is an ambient
+        # type-only declaration — it emits no runtime binding, so it must
+        # not be advertised as runtime-importable. (declare on const/
+        # function/class still describes a real runtime value defined
+        # elsewhere, so only the namespace case flips to type-only.)
+        if kind in ("interface", "type") or (is_declare and kind == "namespace"):
             _add(types, name)
         else:
             _add(values, name)
