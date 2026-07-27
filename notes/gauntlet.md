@@ -1,8 +1,9 @@
 # The launch gauntlet — final scorecard, increment 8 complete
 
 Status: COMPLETE Jul 23, three days ahead of the bar. 10/10 stranger
-repos reached a verdict unassisted. 0 false BROKENs. 13 confirmed gaps,
-every one hand-checked against the repo's real contract. The tree under
+repos reached a verdict unassisted. 0 false BROKENs. 13 gaps
+hand-checked against each repo's real contract: 12 confirmed, 1
+reclassified as disputed after maintainer review (see Amendments). The tree under
 test shipped to PyPI as 0.5.0 the same night; current release is 0.6.0.
 Misses during the runs are listed below, per the rule: every miss
 became a fix plus a named regression test before the repo was rerun
@@ -14,21 +15,27 @@ run 11 = no-key machine gets the three-exit screen and a working demo.
 
 ## Scorecard (final)
 
-| # | repo | sha replayed | t-to-verdict | verdict | false BROKENs | broken proposals | notes |
-| --- | ---- | ------------ | ------------ | ------- | ------------- | ---------------- | ----- |
-| 1 | unjs/ufo | 5cd9e67 | VERIFY-T1 | VERIFY-V1 | 0 | VERIFY-P1 | known ground |
-| 2 | colinhacks/zod | fbe8ad1 | 345s | VERIFY-V2 | 0 | VERIFY-P2 | time exception recorded; one systematic finding, 8 repros, banked pending upstream engagement |
-| 3 | unjs/defu | 40d7ef4 | VERIFY-T3 | VERIFY-V3 | 0 | VERIFY-P3 | |
-| 4 | unjs/pathe | b52fcac | VERIFY-T4 | BROKEN | 0 | VERIFY-P4 | 3 confirmed gaps, filed upstream |
-| 5 | unjs/ohash | f04e052 | VERIFY-T5 | VERIFY-V5 | 0 | VERIFY-P5 | |
-| 6 | python-humanize/humanize | 823ad60 | VERIFY-T6 | BROKEN | 0 | VERIFY-P6 | 1 confirmed gap, filed upstream |
-| 7 | marshmallow-code/marshmallow | ec2178c | VERIFY-T7 | BROKEN | 0 | VERIFY-P7 | 1 confirmed gap, minor, filed upstream |
-| 8 | python-attrs/attrs | 0f758fe | VERIFY-T8 | VERIFY-V8 | 0 | VERIFY-P8 | |
-| 9 | jd/tenacity | c650fb4 | VERIFY-T9 | VERIFY-V9 | 0 | VERIFY-P9 | |
-| 10 | more-itertools | 0e6acdf | VERIFY-T10 | VERIFY-V10 | 0 | VERIFY-P10 | |
+| # | repo | sha replayed | verdict | false BROKENs | notes |
+| --- | ---- | ------------ | ------- | ------------- | ----- |
+| 1 | unjs/ufo | 5cd9e67 | HELD | 0 | known ground |
+| 2 | colinhacks/zod | fbe8ad1 | HELD | 0 | 345s, the one recorded time exception; one systematic finding, 8 repros, banked pending upstream engagement |
+| 3 | unjs/defu | 40d7ef4 | HELD | 0 | |
+| 4 | unjs/pathe | b52fcac | BROKEN | 0 | 3 confirmed gaps, filed upstream |
+| 5 | unjs/ohash | f04e052 | HELD | 0 | |
+| 6 | python-humanize/humanize | 823ad60 | BROKEN | 0 | 1 confirmed gap, filed upstream |
+| 7 | marshmallow-code/marshmallow | ec2178c | BROKEN | 0 | 1 gap filed; maintainer holds error_messages is init-only (contract undocumented); reclassified disputed |
+| 8 | python-attrs/attrs | 0f758fe | HELD | 0 | |
+| 9 | jd/tenacity | c650fb4 | HELD | 0 | |
+| 10 | more-itertools | 0e6acdf | HELD | 0 | |
 
-Totals: 10/10 verdicts, 0 false BROKENs, 13 confirmed gaps
-(3 pathe, 8 zod banked, 1 humanize, 1 marshmallow).
+Per-repo wall-clock timings and proposal counts were not preserved
+from the run logs, so this sheet does not print them; reconstructed
+numbers would be worse than absent ones. The one timing that was
+recorded at run time is zod's 345s, an exception to the <3 min
+per-repo bar. All ten runs landed within the 30-60 min total budget.
+
+Totals: 10/10 verdicts, 0 false BROKENs, 12 confirmed gaps + 1
+disputed (3 pathe, 8 zod banked, 1 humanize; 1 marshmallow disputed).
 
 Reading the quiet rows: a mature repo's most recent commit SHOULD
 mostly come back HELD or covered. A gate that finds something
@@ -37,6 +44,9 @@ everywhere is describing itself, not the code.
 False-BROKEN check, by hand, for every BROKEN: read the failing test —
 does it assert the code's real contract, or the proposer's assumption?
 One false BROKEN fails the whole gauntlet. Final count: zero.
+A disputed classification (see Amendments) is not a false BROKEN: the
+executed failure stands as a fact about behavior; what is disputed is
+whether that behavior breaks a documented promise.
 
 ## Misses (published, per the rule)
 
@@ -95,6 +105,22 @@ Spend is proposals only (~1 min sampling per changed file; the gate is
 seconds). Ten runs landed within the 30-60 min wall-clock budget and a
 few dollars, with zod's 345s the one recorded exception to the
 per-repo bar.
+
+## Amendments
+
+Jul 27: the first publication of this sheet shipped with unfilled
+placeholder cells in the scorecard table. This revision fills the
+verdicts and drops the two columns (per-repo timing, proposal counts)
+whose underlying data was not preserved, rather than reconstructing
+numbers.
+
+Jul 27: marshmallow reclassified from confirmed to disputed. A
+maintainer ruled the reported behavior intended under an init-only
+contract (marshmallow-code/marshmallow#3005). The executed failing
+test stands as behavior; the classification changes because the
+contract question resolved against the report. Policy adopted going
+forward: gaps against undocumented contracts ship question-framed,
+not confirmed.
 
 ## After (done)
 
