@@ -57,6 +57,7 @@ def _strip_fences(text: str) -> str:
 
 
 class TestRepairer:
+    __test__ = False  # not a pytest test class despite the name
     def __init__(self, model: str = "gpt-5.5", client=None, log=print):
         self.model = model
         self.base_url = ""
