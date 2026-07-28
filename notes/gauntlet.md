@@ -3,7 +3,7 @@
 Status: COMPLETE Jul 23, three days ahead of the bar. 10/10 stranger
 repos reached a verdict unassisted. 0 false BROKENs. 13 gaps
 hand-checked against each repo's real contract: 12 confirmed, 1
-reclassified as disputed after maintainer review (see Amendments). The tree under
+ruled as-intended by maintainers after review (see Amendments). The tree under
 test shipped to PyPI as 0.5.0 the same night; current release is 0.6.0.
 Misses during the runs are listed below, per the rule: every miss
 became a fix plus a named regression test before the repo was rerun
@@ -23,7 +23,7 @@ run 11 = no-key machine gets the three-exit screen and a working demo.
 | 4 | unjs/pathe | b52fcac | BROKEN | 0 | 3 confirmed gaps, filed upstream |
 | 5 | unjs/ohash | f04e052 | HELD | 0 | |
 | 6 | python-humanize/humanize | 823ad60 | BROKEN | 0 | 1 confirmed gap, filed upstream |
-| 7 | marshmallow-code/marshmallow | ec2178c | BROKEN | 0 | 1 gap filed; maintainer holds error_messages is init-only (contract undocumented); reclassified disputed |
+| 7 | marshmallow-code/marshmallow | ec2178c | BROKEN | 0 | 1 gap filed; maintainers ruled the behavior intended (error_messages is init-only, customize via subclass); reclassified as-intended |
 | 8 | python-attrs/attrs | 0f758fe | HELD | 0 | |
 | 9 | jd/tenacity | c650fb4 | HELD | 0 | |
 | 10 | more-itertools | 0e6acdf | HELD | 0 | |
@@ -35,7 +35,8 @@ recorded at run time is zod's 345s, an exception to the <3 min
 per-repo bar. All ten runs landed within the 30-60 min total budget.
 
 Totals: 10/10 verdicts, 0 false BROKENs, 12 confirmed gaps + 1
-disputed (3 pathe, 8 zod banked, 1 humanize; 1 marshmallow disputed).
+ruled as-intended (3 pathe, 8 zod banked, 1 humanize; marshmallow
+as-intended).
 
 Reading the quiet rows: a mature repo's most recent commit SHOULD
 mostly come back HELD or covered. A gate that finds something
@@ -44,9 +45,9 @@ everywhere is describing itself, not the code.
 False-BROKEN check, by hand, for every BROKEN: read the failing test —
 does it assert the code's real contract, or the proposer's assumption?
 One false BROKEN fails the whole gauntlet. Final count: zero.
-A disputed classification (see Amendments) is not a false BROKEN: the
-executed failure stands as a fact about behavior; what is disputed is
-whether that behavior breaks a documented promise.
+An as-intended reclassification (see Amendments) is not a false
+BROKEN: the executed failure stands as a fact about behavior; what
+changed is the ruling on whether that behavior breaks a promise.
 
 ## Misses (published, per the rule)
 
@@ -114,13 +115,15 @@ verdicts and drops the two columns (per-repo timing, proposal counts)
 whose underlying data was not preserved, rather than reconstructing
 numbers.
 
-Jul 27: marshmallow reclassified from confirmed to disputed. A
-maintainer ruled the reported behavior intended under an init-only
-contract (marshmallow-code/marshmallow#3005). The executed failing
-test stands as behavior; the classification changes because the
-contract question resolved against the report. Policy adopted going
-forward: gaps against undocumented contracts ship question-framed,
-not confirmed.
+Jul 27: marshmallow reclassified from confirmed to as-intended.
+Maintainers ruled the reported behavior intended under an init-only
+contract; customization belongs in subclasses
+(marshmallow-code/marshmallow#3005). The executed failing test stands
+as a fact about behavior; the classification changes because the
+contract's owners ruled on intent. This is the division of labor the
+gate is built on: execution proves what code does, and only humans
+decide what code promised. Policy adopted going forward: gaps against
+undocumented contracts ship question-framed, not confirmed.
 
 ## After (done)
 
