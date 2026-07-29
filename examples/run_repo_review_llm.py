@@ -14,12 +14,12 @@ and shown on the board with the real reason.
 """
 import sys
 
-from agentboard import build_loop, initial_board
-from agentboard.experimental.agents.openai_agent import OpenAIAgent
-from agentboard.experimental.agents.openai_explainer import OpenAIExplainer
-from agentboard.experimental.ingestion.repo_adapter import RepoIngestionAdapter
-from agentboard.experimental.verifiers.pytest_verifier import PytestVerifier
-from agentboard.experimental.whiteboards.flow_adapter import FlowWhiteboardAdapter
+from edgeverdict import build_loop, initial_board
+from edgeverdict.experimental.agents.openai_agent import OpenAIAgent
+from edgeverdict.experimental.agents.openai_explainer import OpenAIExplainer
+from edgeverdict.experimental.ingestion.repo_adapter import RepoIngestionAdapter
+from edgeverdict.experimental.verifiers.pytest_verifier import PytestVerifier
+from edgeverdict.experimental.whiteboards.flow_adapter import FlowWhiteboardAdapter
 
 PERSONAS = [
     ("backend", "Ships features; wants precise behavior."),
@@ -44,7 +44,7 @@ def main():
     app = build_loop(
         agent=agent,
         verifier=PytestVerifier(repo, test_args=["-q", "--tb=line", "-rf"]),
-        whiteboard=FlowWhiteboardAdapter(path="agentboard_repo_llm.html"),
+        whiteboard=FlowWhiteboardAdapter(path="edgeverdict_repo_llm.html"),
         personas=PERSONAS,
         budget=2,
         explainer=explainer,

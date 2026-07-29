@@ -1,6 +1,6 @@
 # Benchmark
 
-Can agentboard find a real bug in code it has never seen, from an intent
+Can edgeverdict find a real bug in code it has never seen, from an intent
 that does not name the bug? This measures that, on recent merged bugfix PRs
 from active TypeScript repositories, and publishes the misses.
 
@@ -11,7 +11,7 @@ For each row:
 1. Pick a bugfix PR that is already merged into an active repo.
 2. Check out the PR's **parent** commit: the code exactly as it was before
    the fix. The bug is present.
-3. Run agentboard with a **neutral intent** that describes what the module
+3. Run edgeverdict with a **neutral intent** that describes what the module
    is for, never what the bug is. PR titles telegraph the answer, so the PR
    and its tests are ground truth, not input.
 4. Score the confirmed gaps against the fix, by reading source.
@@ -21,7 +21,7 @@ with default values" is a fair description of defu; "prevent prototype
 pollution via `__proto__`" would be handing over the answer. If a skeptic
 can argue the intent leaked the bug, the row does not count.
 
-No row uses the bug agentboard was originally developed against
+No row uses the bug edgeverdict was originally developed against
 (supabase/mcp #317). Training on your test set is not a benchmark; #317
 appears only as a disclosed reference case in the README.
 
@@ -153,7 +153,7 @@ change, stranger-mode review), a neutral intent, and the auditor on:
 
 ```
 git clone <repo> && cd <repo> && git checkout <parent-sha>
-agentboard review --repo . --target <file> --tests <tests> \
+edgeverdict review --repo . --target <file> --tests <tests> \
   --head HEAD --base HEAD --intent "<neutral intent>" \
   --audit-model claude-sonnet-5 --json-out run.json
 ```

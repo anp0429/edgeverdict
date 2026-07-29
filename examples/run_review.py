@@ -14,15 +14,15 @@ gate confirm which are real gaps?
 """
 import os
 
-from agentboard.ingestion.intent import resolve_intent
-from agentboard.agents.reviewer_agent import ReviewerAgent
-from agentboard.agents.critic_agent import CriticAgent
-from agentboard.agents.gap_auditor import GapAuditor
-from agentboard.verifiers.finding_verifier import FindingVerifier
-from agentboard.verifiers.vitest_verifier import RepoProfile
-from agentboard.fingerprint import verdict_summary
-from agentboard.proposal_cache import propose_or_cached
-from agentboard.review import ReviewRun, render_review_html
+from edgeverdict.ingestion.intent import resolve_intent
+from edgeverdict.agents.reviewer_agent import ReviewerAgent
+from edgeverdict.agents.critic_agent import CriticAgent
+from edgeverdict.agents.gap_auditor import GapAuditor
+from edgeverdict.verifiers.finding_verifier import FindingVerifier
+from edgeverdict.verifiers.vitest_verifier import RepoProfile
+from edgeverdict.fingerprint import verdict_summary
+from edgeverdict.proposal_cache import propose_or_cached
+from edgeverdict.review import ReviewRun, render_review_html
 
 # --- edit these --------------------------------------------------------------
 CLONE = os.environ.get("CLONE", "/Users/ankita/Documents/zod")
@@ -60,7 +60,7 @@ def main():
     change = ""
     if PR_HEAD:
         try:
-            from agentboard.ingestion.pr_diff import load_pr_diff, diff_blob
+            from edgeverdict.ingestion.pr_diff import load_pr_diff, diff_blob
             change = diff_blob(load_pr_diff(CLONE, head=PR_HEAD, base=PR_BASE))
             print(f"CHANGE: {len(change)} chars of diff loaded ({PR_HEAD} vs {PR_BASE})\n")
         except Exception as e:
@@ -75,7 +75,7 @@ def main():
         build_cmd=None,
         env={"CI": "true"},
         smoke_cmd=["npx", "vitest", "run", "--project", "zod",
-                   "--passWithNoTests", "-t", "___agentboard_env_probe___"],
+                   "--passWithNoTests", "-t", "___edgeverdict_env_probe___"],
     )
     profile.harness_notes = (
         "The tests file already imports everything needed (z from zod). "

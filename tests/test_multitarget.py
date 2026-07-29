@@ -12,8 +12,8 @@ import os
 import tempfile
 import types
 
-from agentboard.cli import _resolve_targets
-from agentboard.review import ReviewFinding, ReviewRun
+from edgeverdict.cli import _resolve_targets
+from edgeverdict.review import ReviewFinding, ReviewRun
 
 
 def _repo_with(*files):

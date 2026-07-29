@@ -13,10 +13,10 @@ import types
 
 import pytest
 
-from agentboard.agents.critic_agent import CriticAgent
-from agentboard.agents.gap_auditor import GapAuditor
-from agentboard.agents.reviewer_agent import ReviewerAgent, _loads_lenient
-from agentboard.providers import openai_client, uses_anthropic
+from edgeverdict.agents.critic_agent import CriticAgent
+from edgeverdict.agents.gap_auditor import GapAuditor
+from edgeverdict.agents.reviewer_agent import ReviewerAgent, _loads_lenient
+from edgeverdict.providers import openai_client, uses_anthropic
 
 
 # -- the rule itself ---------------------------------------------------------
@@ -67,7 +67,7 @@ def test_real_key_wins_over_placeholder(monkeypatch):
 
 def _preflight_keys(monkeypatch, model, base_url=None, tmp_path=None):
     import subprocess
-    from agentboard.config import preflight
+    from edgeverdict.config import preflight
     r = str(tmp_path)
     subprocess.run(["git", "-C", r, "init", "-q"], check=True)
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
@@ -140,30 +140,30 @@ def test_fenced_salvage_helper_direct():
 # ---------------------------------------------------------------------------
 
 def test_endpoint_label_default_is_openai(monkeypatch):
-    from agentboard.providers import endpoint_label
+    from edgeverdict.providers import endpoint_label
     monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
     assert endpoint_label("gpt-5.5") == "api.openai.com"
 
 
 def test_endpoint_label_shows_env_redirect(monkeypatch):
-    from agentboard.providers import endpoint_label
+    from edgeverdict.providers import endpoint_label
     monkeypatch.setenv("OPENAI_BASE_URL", "http://localhost:11434/v1")
     assert endpoint_label("gpt-5.5") == "localhost:11434"
 
 
 def test_endpoint_label_explicit_pin_beats_env(monkeypatch):
-    from agentboard.providers import endpoint_label
+    from edgeverdict.providers import endpoint_label
     monkeypatch.setenv("OPENAI_BASE_URL", "http://localhost:11434/v1")
     assert endpoint_label("qwen3", "https://openrouter.ai/api/v1") == "openrouter.ai"
 
 
 def test_endpoint_label_claude_is_anthropic(monkeypatch):
-    from agentboard.providers import endpoint_label
+    from edgeverdict.providers import endpoint_label
     assert endpoint_label("claude-opus-4-8") == "anthropic"
 
 
 def test_config_base_url_key_is_loaded(tmp_path):
-    from agentboard.config import load_config
+    from edgeverdict.config import load_config
     p = tmp_path / "cfg.toml"
     p.write_text('base_url = "http://localhost:11434/v1"\n')
     cfg = load_config(str(tmp_path), str(p))
@@ -173,7 +173,7 @@ def test_config_base_url_key_is_loaded(tmp_path):
 def test_openrouter_key_without_base_url_fails_preflight(tmp_path, monkeypatch):
     import subprocess
 
-    from agentboard.config import preflight
+    from edgeverdict.config import preflight
 
     repo = str(tmp_path / "r")
     os.makedirs(repo)
@@ -191,7 +191,7 @@ def test_openrouter_key_without_base_url_fails_preflight(tmp_path, monkeypatch):
 def test_openrouter_key_with_base_url_is_fine(tmp_path, monkeypatch):
     import subprocess
 
-    from agentboard.config import preflight
+    from edgeverdict.config import preflight
 
     repo = str(tmp_path / "r")
     os.makedirs(repo)

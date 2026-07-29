@@ -8,7 +8,7 @@ import subprocess
 
 import pytest
 
-from agentboard.config import targets_from_diff, working_tree_dirty
+from edgeverdict.config import targets_from_diff, working_tree_dirty
 
 
 def _git(repo, *args):
@@ -115,7 +115,7 @@ def test_empty_diff_returns_empty_list_not_an_error(repo):
 
 
 def test_untracked_source_files_are_named_not_silently_ignored(repo):
-    from agentboard.config import untracked_source_files
+    from edgeverdict.config import untracked_source_files
     (repo / "brand_new.py").write_text("N = 1\n")
     (repo / "test_new.py").write_text("def test_n(): pass\n")
     (repo / "notes.md").write_text("hi\n")
@@ -123,7 +123,7 @@ def test_untracked_source_files_are_named_not_silently_ignored(repo):
 
 
 def test_import_surface_names_the_module_and_public_names(tmp_path):
-    from agentboard.agents.reviewer_agent import import_surface
+    from edgeverdict.agents.reviewer_agent import import_surface
     pkg = tmp_path / "src" / "pkg"
     pkg.mkdir(parents=True)
     (tmp_path / "src" / "__init__.py").write_text("")
@@ -148,7 +148,7 @@ def test_ts_import_surface_extracts_declarations_and_reexports(tmp_path):
     # broken-proposal signature). Entry files are re-export chains, so
     # the star hop must be followed and type-only names must be kept
     # out of the runtime list.
-    from agentboard.agents.reviewer_agent import import_surface
+    from edgeverdict.agents.reviewer_agent import import_surface
     (tmp_path / "package.json").write_text('{"name": "demo-pkg"}')
     src = tmp_path / "src"
     src.mkdir()
@@ -183,7 +183,7 @@ def test_ts_import_surface_extracts_declarations_and_reexports(tmp_path):
 
 def test_ts_import_surface_is_silent_when_nothing_resolves(tmp_path):
     # silence over a confident wrong answer, same rule as the python side
-    from agentboard.agents.reviewer_agent import import_surface
+    from edgeverdict.agents.reviewer_agent import import_surface
     (tmp_path / "empty.ts").write_text("const internal = 1\n")
     assert import_surface(str(tmp_path), "empty.ts") == ""
     assert import_surface(str(tmp_path), "missing.ts") == ""
@@ -193,7 +193,7 @@ def test_import_surface_collects_match_statement_bindings(tmp_path):
     # defect 26 (board scenario e6ecaf785f9bbc67): the module-scope walk
     # descended if/try/for/while/with but not match — case-body bindings
     # and capture patterns are real module globals that persist
-    from agentboard.agents.reviewer_agent import import_surface
+    from edgeverdict.agents.reviewer_agent import import_surface
     pkg = tmp_path / "pkg"
     pkg.mkdir()
     (pkg / "__init__.py").write_text("")
@@ -225,7 +225,7 @@ def test_import_surface_collects_match_statement_bindings(tmp_path):
 
 
 def test_import_surface_for_package_init_is_the_package(tmp_path):
-    from agentboard.agents.reviewer_agent import import_surface
+    from edgeverdict.agents.reviewer_agent import import_surface
     pkg = tmp_path / "acme"
     pkg.mkdir()
     (pkg / "__init__.py").write_text("def hello():\n    pass\n")
@@ -235,7 +235,7 @@ def test_import_surface_for_package_init_is_the_package(tmp_path):
 
 
 def test_import_surface_is_empty_for_unsupported_and_unparsable(tmp_path):
-    from agentboard.agents.reviewer_agent import import_surface
+    from edgeverdict.agents.reviewer_agent import import_surface
     # .ts stopped being "unsupported" at catch 6 (it has its own
     # surface now); an actually-unsupported language and broken python
     # still yield silence
@@ -249,7 +249,7 @@ def test_import_surface_round_three_regressions(tmp_path):
     """The five gaps the gate found in import_surface itself (run
     e4a011add5ff924c), one file: annotated constants, tuple/compound
     assignments, lowercase public bindings, and privates still excluded."""
-    from agentboard.agents.reviewer_agent import import_surface
+    from edgeverdict.agents.reviewer_agent import import_surface
     (tmp_path / "mod.py").write_text(
         "ENABLED: bool = True\n"
         "bare_annotation: int\n"
@@ -266,7 +266,7 @@ def test_import_surface_round_three_regressions(tmp_path):
 
 
 def test_import_surface_init_reexports_are_the_public_surface(tmp_path):
-    from agentboard.agents.reviewer_agent import import_surface
+    from edgeverdict.agents.reviewer_agent import import_surface
     pkg = tmp_path / "src" / "pkg"
     pkg.mkdir(parents=True)
     (pkg / "__init__.py").write_text(
@@ -280,7 +280,7 @@ def test_import_surface_init_reexports_are_the_public_surface(tmp_path):
 
 
 def test_import_surface_namespace_packages_keep_the_full_path(tmp_path):
-    from agentboard.agents.reviewer_agent import import_surface
+    from edgeverdict.agents.reviewer_agent import import_surface
     d = tmp_path / "company" / "product"
     d.mkdir(parents=True)  # PEP 420: no __init__.py anywhere
     (d / "feature.py").write_text("def go():\n    pass\n")
@@ -289,7 +289,7 @@ def test_import_surface_namespace_packages_keep_the_full_path(tmp_path):
 
 
 def test_import_surface_regular_module_imports_are_not_api(tmp_path):
-    from agentboard.agents.reviewer_agent import import_surface
+    from edgeverdict.agents.reviewer_agent import import_surface
     (tmp_path / "mod.py").write_text("import json\n\ndef fn():\n    pass\n")
     out = import_surface(str(tmp_path), "mod.py")
     assert "fn" in out
@@ -300,7 +300,7 @@ def test_import_surface_round_four_regressions(tmp_path):
     """Run 6e0f5bfb428f68c7: module-level for/with targets persist as
     globals and are listed; a del removes its name; a top-level walrus
     binds; names inside nested scopes still never leak."""
-    from agentboard.agents.reviewer_agent import import_surface
+    from edgeverdict.agents.reviewer_agent import import_surface
     (tmp_path / "mod.py").write_text(
         "for item in [1]:\n    pass\n"
         "with open(__file__) as handle:\n    pass\n"
@@ -320,7 +320,7 @@ def test_import_surface_round_four_regressions(tmp_path):
 def test_import_surface_refuses_untrustworthy_truncated_paths(tmp_path):
     """A non-identifier path segment below any source root makes the
     module path a guess; the honest surface is none at all."""
-    from agentboard.agents.reviewer_agent import import_surface
+    from edgeverdict.agents.reviewer_agent import import_surface
     bad = tmp_path / "my-lib" / "pkg"
     bad.mkdir(parents=True)
     (bad / "mod.py").write_text("def fn():\n    pass\n")
@@ -338,7 +338,7 @@ def test_import_surface_round_six_regressions(tmp_path):
     every contained name; walrus in a def's default binds; a binding
     inside a module-level except body persists while the handler alias
     (deleted by Python) stays out."""
-    from agentboard.agents.reviewer_agent import import_surface
+    from edgeverdict.agents.reviewer_agent import import_surface
     (tmp_path / "my-module.py").write_text("def fn():\n    pass\n")
     assert import_surface(str(tmp_path), "my-module.py") == ""
 
@@ -368,7 +368,7 @@ def test_vitest_inject_merges_needed_imports(tmp_path):
     # The merge keeps only names the target's real export surface vouches
     # for, dedupes what the host already binds, and lands after the last
     # host import.
-    from agentboard.verifiers.harness import VitestHarness
+    from edgeverdict.verifiers.harness import VitestHarness
     src = tmp_path / "src"
     src.mkdir()
     (src / "index.ts").write_text(
@@ -415,7 +415,7 @@ def test_ts_surface_drops_unresolved_reexport_sources(tmp_path):
     # defect 27 (PR #7 board, blocking class): a dangling relative
     # re-export must contribute no names — the module cannot load, so
     # the surface vouching for it is a wrong prompt fact
-    from agentboard.ts_surface import _ts_exports
+    from edgeverdict.ts_surface import _ts_exports
     (tmp_path / "here.ts").write_text("export const real = 1;\n")
     idx = tmp_path / "index.ts"
     idx.write_text(
@@ -432,7 +432,7 @@ def test_vitest_merge_preserves_aliases_and_trailing_newline(tmp_path):
     # defects 28 + 29 (PR #7 board): aliased imports merge as
     # `exported as local` verified against the exported name, and the
     # merged file keeps its trailing newline so re-merge is idempotent
-    from agentboard.verifiers.harness import VitestHarness
+    from edgeverdict.verifiers.harness import VitestHarness
     src = tmp_path / "src"
     src.mkdir()
     (src / "index.ts").write_text("export function alpha() {}\n")
@@ -463,7 +463,7 @@ def test_ts_surface_drops_unresolved_namespace_reexport(tmp_path):
     # defect 30 (PR #7 board): `export * as ns from './unresolved'` must
     # contribute no name — same wrong-prompt-fact rule as defect 27, one
     # branch over (the namespace-alias path)
-    from agentboard.ts_surface import _ts_exports
+    from edgeverdict.ts_surface import _ts_exports
     (tmp_path / "here.ts").write_text("export const x = 1;\n")
     idx = tmp_path / "index.ts"
     idx.write_text(
@@ -481,7 +481,7 @@ def test_ts_surface_declare_namespace_is_type_only(tmp_path):
     # type-only declaration with no runtime binding — it must not be
     # advertised as runtime-importable. declare const/function still
     # describe real runtime values; plain namespace is runtime.
-    from agentboard.ts_surface import _ts_exports
+    from edgeverdict.ts_surface import _ts_exports
     m = tmp_path / "m.ts"
     m.write_text(
         "export declare namespace ONLY_FOR_TYPES {}\n"

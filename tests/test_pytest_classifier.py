@@ -5,7 +5,7 @@ RAISED exception classifies. A report that mentions an exception is not a
 report of that exception, and an unrecognizable report is always
 load_error, never a fabricated assertion gap."""
 
-from agentboard.verifiers.pytest_harness import PytestHarness
+from edgeverdict.verifiers.pytest_harness import PytestHarness
 
 
 H = PytestHarness()
@@ -48,7 +48,7 @@ def test_pytest_timeout_plugin_routes_to_ambiguity():
 
 
 def test_plain_crash_names_itself():
-    fm = "ImportError: cannot import name 'nope' from 'agentboard.cli'\n"
+    fm = "ImportError: cannot import name 'nope' from 'edgeverdict.cli'\n"
     kind, _ = H.classify_failure(fm)
     assert kind == "load_error"
 
@@ -105,8 +105,8 @@ def test_setup_error_headline_is_the_exception_not_the_coordinate():
     fm = (
         "failed on setup with \"file /tmp/x/tests/test_host.py, line 214\"\n"
         "    def test_proposal():\n"
-        ">       from agentboard.cli import _targets_from_diff\n"
-        "E   ImportError: cannot import name '_targets_from_diff' from 'agentboard.cli'\n"
+        ">       from edgeverdict.cli import _targets_from_diff\n"
+        "E   ImportError: cannot import name '_targets_from_diff' from 'edgeverdict.cli'\n"
     )
     line = H.failure_headline(fm)
     assert line.startswith("ImportError:")

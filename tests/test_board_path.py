@@ -12,7 +12,7 @@ import tempfile
 
 def _parse_review(argv):
     """Parse a review command up to dispatch, capturing the namespace."""
-    import agentboard.cli as cli
+    import edgeverdict.cli as cli
 
     captured = {}
     orig = cli.review
@@ -37,7 +37,7 @@ def test_explicit_board_is_preserved():
 
 def test_resolved_default_is_outside_any_repo():
     # Mirror the resolution logic in review(): empty -> system temp dir.
-    board = "" or os.path.join(tempfile.gettempdir(), "agentboard_review_board.html")
+    board = "" or os.path.join(tempfile.gettempdir(), "edgeverdict_review_board.html")
     assert board.startswith(tempfile.gettempdir())
     # and specifically not a relative in-repo path
     assert not board.startswith("./")
@@ -50,7 +50,7 @@ def test_demo_board_never_lands_in_cwd():
     # source so the literal cwd-relative path cannot come back.
     import inspect
 
-    import agentboard.cli as cli
+    import edgeverdict.cli as cli
 
     src = inspect.getsource(cli.demo) if hasattr(cli, "demo") else inspect.getsource(cli)
-    assert './agentboard_demo_board.html"' not in src.replace("'", '"')
+    assert './edgeverdict_demo_board.html"' not in src.replace("'", '"')

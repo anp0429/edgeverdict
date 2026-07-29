@@ -12,8 +12,8 @@ import subprocess
 
 import pytest
 
-from agentboard.config import preflight
-from agentboard.ingestion.pr_diff import load_pr_diff, load_worktree_diff
+from edgeverdict.config import preflight
+from edgeverdict.ingestion.pr_diff import load_pr_diff, load_worktree_diff
 
 
 def _git(repo, *args):

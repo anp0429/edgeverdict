@@ -3,7 +3,7 @@ positives the gate's own self-reviews produced, jarred at the time with
 exactly this layer in mind. Advisory only — a note never changes a
 status, and unparsable code is the broken-test path's job, not ours."""
 
-from agentboard.verifiers.assertion_lint import lint_test
+from edgeverdict.verifiers.assertion_lint import lint_test
 
 
 def test_specimen_one_short_needle_against_prose():
@@ -54,6 +54,6 @@ def test_unparsable_code_is_not_this_layers_job():
 
 
 def test_lint_note_field_exists_and_defaults_empty():
-    from agentboard.review import ReviewFinding
+    from edgeverdict.review import ReviewFinding
     f = ReviewFinding(behavior="b")
     assert f.lint_note == ""

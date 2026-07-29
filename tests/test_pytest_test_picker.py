@@ -6,7 +6,7 @@ plain importers, closest directory beats distant ones."""
 
 import os
 
-from agentboard.verifiers.pytest_harness import PytestHarness
+from edgeverdict.verifiers.pytest_harness import PytestHarness
 
 
 def _mk(root, rel, text=""):

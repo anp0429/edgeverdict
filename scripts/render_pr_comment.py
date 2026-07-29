@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Render a PR comment from an agentboard --json-out artifact (schema v1).
+"""Render a PR comment from an edgeverdict --json-out artifact (schema v1).
 
 Usage: python3 scripts/render_pr_comment.py run.json > comment.md
 
@@ -7,7 +7,7 @@ Design position (deliberate, do not "improve" away):
 - The evidence is the product. Confirmed gaps show the failing test source
   and its observed output so a maintainer can judge in seconds.
 - Everything that is not a confirmed gap is collapsed. broken_test,
-  skipped_covered, and handled details are agentboard's bookkeeping, not
+  skipped_covered, and handled details are edgeverdict's bookkeeping, not
   the maintainer's problem.
 - Advisory only. This renderer never suggests blocking anything.
 - test_code and observed are nullable (skipped_covered findings never
@@ -17,7 +17,7 @@ Design position (deliberate, do not "improve" away):
 import json
 import sys
 
-MARKER = "<!-- agentboard-review -->"
+MARKER = "<!-- edgeverdict-review -->"
 
 
 def _code(text: str, lang: str = "") -> str:
@@ -32,7 +32,7 @@ def main() -> int:
     gaps = [f for f in findings if f.get("status") == "confirmed_gap"]
     rest = [f for f in findings if f.get("status") != "confirmed_gap"]
 
-    lines: list[str] = [MARKER, "### agentboard review", ""]
+    lines: list[str] = [MARKER, "### edgeverdict review", ""]
 
     if doc.get("env_error"):
         lines += [
@@ -105,7 +105,7 @@ def main() -> int:
         "---",
         "*Advisory only; a human decides. Verdicts come from executed "
         "tests, never from model judgment. "
-        "[agentboard](https://github.com/anp0429/agentboard)*",
+        "[edgeverdict](https://github.com/anp0429/edgeverdict)*",
     ]
 
     sys.stdout.write("\n".join(lines) + "\n")

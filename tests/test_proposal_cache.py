@@ -13,8 +13,8 @@ from __future__ import annotations
 import json
 import os
 
-from agentboard.proposal_cache import load, propose_or_cached, proposal_key, save
-from agentboard.review import ReviewFinding
+from edgeverdict.proposal_cache import load, propose_or_cached, proposal_key, save
+from edgeverdict.review import ReviewFinding
 
 _BASE = dict(
     intent="i", change="c", source="s", tests="t",
@@ -33,7 +33,7 @@ def test_key_is_stable_and_sensitive_to_every_input():
 
 
 def test_roundtrip_preserves_proposals_and_resets_verdicts(tmp_path, monkeypatch):
-    monkeypatch.setenv("AGENTBOARD_CACHE_DIR", str(tmp_path))
+    monkeypatch.setenv("EDGEVERDICT_CACHE_DIR", str(tmp_path))
     f = ReviewFinding(
         behavior="b", axis="consistency", covered_by_existing=False,
         coverage_note="none found", test_path="x.test.ts",
@@ -52,7 +52,7 @@ def test_roundtrip_preserves_proposals_and_resets_verdicts(tmp_path, monkeypatch
 
 
 def test_corrupt_entry_is_a_miss_not_a_crash(tmp_path, monkeypatch):
-    monkeypatch.setenv("AGENTBOARD_CACHE_DIR", str(tmp_path))
+    monkeypatch.setenv("EDGEVERDICT_CACHE_DIR", str(tmp_path))
     with open(tmp_path / "bad.json", "w", encoding="utf-8") as fh:
         fh.write("{ not json")
     assert load("bad") is None
@@ -72,8 +72,8 @@ class _FakeReviewer:
 
 
 def test_hit_skips_the_model_and_fresh_resamples(tmp_path, monkeypatch, capsys):
-    monkeypatch.setenv("AGENTBOARD_CACHE_DIR", str(tmp_path))
-    monkeypatch.delenv("AGENTBOARD_FRESH", raising=False)
+    monkeypatch.setenv("EDGEVERDICT_CACHE_DIR", str(tmp_path))
+    monkeypatch.delenv("EDGEVERDICT_FRESH", raising=False)
     r = _FakeReviewer()
     args = dict(intent="i", change="c", source="s", tests="t")
 
@@ -94,7 +94,7 @@ def test_hit_skips_the_model_and_fresh_resamples(tmp_path, monkeypatch, capsys):
 
 
 def test_cache_file_holds_only_proposal_fields(tmp_path, monkeypatch):
-    monkeypatch.setenv("AGENTBOARD_CACHE_DIR", str(tmp_path))
+    monkeypatch.setenv("EDGEVERDICT_CACHE_DIR", str(tmp_path))
     f = ReviewFinding(behavior="b")
     f.status = "handled"
     f.audit = "likely_real"
@@ -117,7 +117,7 @@ def test_empty_propose_is_never_cached(tmp_path, monkeypatch, capsys):
     401'd run cached its empty result, and every later run with the same
     inputs hit that entry and reported 0 behaviors without retrying the
     model — an outage made permanent by the cache."""
-    monkeypatch.setenv("AGENTBOARD_CACHE_DIR", str(tmp_path))
+    monkeypatch.setenv("EDGEVERDICT_CACHE_DIR", str(tmp_path))
     args = dict(intent="i", change="c", source="s", tests="t")
 
     dead = _DeadReviewer()

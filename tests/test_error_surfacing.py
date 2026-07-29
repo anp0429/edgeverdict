@@ -11,7 +11,7 @@ selection is banned from error paths.
 
 import subprocess
 
-from agentboard.verifiers.vitest_verifier import _proc_tail
+from edgeverdict.verifiers.vitest_verifier import _proc_tail
 
 
 def _proc(stdout="", stderr="", code=1):

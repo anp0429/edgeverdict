@@ -10,8 +10,8 @@ import types
 
 import pytest
 
-import agentboard.api as api
-from agentboard.review import ReviewFinding, ReviewRun
+import edgeverdict.api as api
+from edgeverdict.review import ReviewFinding, ReviewRun
 
 
 class _RerunAwareVerifier:

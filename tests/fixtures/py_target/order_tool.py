@@ -1,6 +1,6 @@
 """A tiny "agent tool": look up orders for an LLM agent to reason over.
 
-The Python twin of the packaged JS demo target (src/agentboard/demo/target).
+The Python twin of the packaged JS demo target (src/edgeverdict/demo/target).
 It contains one PLANTED BUG that reads plausibly on review and leaves the
 existing test suite green -- only an edge-case test exposes it.
 """

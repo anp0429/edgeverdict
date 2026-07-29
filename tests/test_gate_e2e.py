@@ -24,12 +24,12 @@ import shutil
 
 import pytest
 
-from agentboard.fingerprint import verdict_fingerprint
-from agentboard.review import ReviewFinding, ReviewRun
-from agentboard.verifiers.finding_verifier import FindingVerifier
-from agentboard.verifiers.vitest_verifier import RepoProfile
+from edgeverdict.fingerprint import verdict_fingerprint
+from edgeverdict.review import ReviewFinding, ReviewRun
+from edgeverdict.verifiers.finding_verifier import FindingVerifier
+from edgeverdict.verifiers.vitest_verifier import RepoProfile
 
-from agentboard.demo import TARGET_DIR as FIXTURE  # packaged demo target
+from edgeverdict.demo import TARGET_DIR as FIXTURE  # packaged demo target
 
 pytestmark = pytest.mark.skipif(
     shutil.which("node") is None or shutil.which("npm") is None,
@@ -46,7 +46,7 @@ def _profile() -> RepoProfile:
         build_cmd=None,
         env={"CI": "true"},
         smoke_cmd=["npx", "vitest", "run", "--passWithNoTests",
-                   "-t", "___agentboard_env_probe___"],
+                   "-t", "___edgeverdict_env_probe___"],
     )
 
 

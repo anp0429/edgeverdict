@@ -13,7 +13,7 @@ import os
 import subprocess
 import sys
 
-from agentboard.verifiers.vitest_verifier import scrubbed_env
+from edgeverdict.verifiers.vitest_verifier import scrubbed_env
 
 
 def test_provider_keys_are_scrubbed(monkeypatch):
@@ -54,8 +54,8 @@ def test_both_verifiers_route_through_scrubbed_env():
     # directly, the scrub silently stops applying. Pin the call sites.
     import inspect
 
-    from agentboard.experimental.verifiers import vitest_verifier
-    from agentboard.verifiers import finding_verifier
+    from edgeverdict.experimental.verifiers import vitest_verifier
+    from edgeverdict.verifiers import finding_verifier
 
     for cls in (finding_verifier.FindingVerifier, vitest_verifier.VitestVerifier):
         src = inspect.getsource(cls._run)

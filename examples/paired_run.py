@@ -17,11 +17,11 @@ import os
 import subprocess
 import sys
 
-from agentboard.fingerprint import verdict_summary
-from agentboard.proposal_cache import load
-from agentboard.review import ReviewRun, render_review_html
-from agentboard.verifiers.finding_verifier import FindingVerifier
-from agentboard.verifiers.vitest_verifier import RepoProfile
+from edgeverdict.fingerprint import verdict_summary
+from edgeverdict.proposal_cache import load
+from edgeverdict.review import ReviewRun, render_review_html
+from edgeverdict.verifiers.finding_verifier import FindingVerifier
+from edgeverdict.verifiers.vitest_verifier import RepoProfile
 
 ZOD = "/Users/ankita/Documents/zod"
 TESTS = "packages/zod/src/v4/classic/tests/error.test.ts"
@@ -44,7 +44,7 @@ def main() -> None:
     prefix, ref_a, ref_b = sys.argv[1], sys.argv[2], sys.argv[3]
 
     cache = os.path.expanduser(
-        os.environ.get("AGENTBOARD_CACHE_DIR", "~/.agentboard/proposal_cache")
+        os.environ.get("EDGEVERDICT_CACHE_DIR", "~/.edgeverdict/proposal_cache")
     )
     matches = glob.glob(f"{cache}/{prefix}*.json")
     if len(matches) != 1:

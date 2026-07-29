@@ -19,13 +19,13 @@ Uses reuse_warm=True so install/build happens ONCE for all N runs, not per run.
 import os
 import re
 
-from agentboard.ingestion.intent import resolve_intent
-from agentboard.ingestion.pr_diff import load_pr_diff, diff_blob
-from agentboard.agents.reviewer_agent import ReviewerAgent
-from agentboard.agents.critic_agent import CriticAgent
-from agentboard.verifiers.finding_verifier import FindingVerifier
-from agentboard.verifiers.vitest_verifier import RepoProfile
-from agentboard.review import ReviewRun
+from edgeverdict.ingestion.intent import resolve_intent
+from edgeverdict.ingestion.pr_diff import load_pr_diff, diff_blob
+from edgeverdict.agents.reviewer_agent import ReviewerAgent
+from edgeverdict.agents.critic_agent import CriticAgent
+from edgeverdict.verifiers.finding_verifier import FindingVerifier
+from edgeverdict.verifiers.vitest_verifier import RepoProfile
+from edgeverdict.review import ReviewRun
 
 # --- frozen config (same as run_review.py) -----------------------------------
 CLONE = os.environ.get("CLONE", "/path/to/your/clone")

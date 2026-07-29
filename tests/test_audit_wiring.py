@@ -11,8 +11,8 @@ import subprocess
 import sys
 import types
 
-from agentboard.agents.gap_auditor import GapAuditor
-from agentboard.review import ReviewFinding, ReviewRun
+from edgeverdict.agents.gap_auditor import GapAuditor
+from edgeverdict.review import ReviewFinding, ReviewRun
 
 
 def _fake_client(payload, calls):
@@ -81,7 +81,7 @@ def test_audit_failure_is_loud_not_silent():
 
 
 def test_json_out_carries_audit_fields(tmp_path):
-    from agentboard.cli import _write_json_out
+    from edgeverdict.cli import _write_json_out
 
     run = ReviewRun(intent="i", target="t")
     gap = ReviewFinding(behavior="g", status="confirmed_gap",
@@ -142,8 +142,8 @@ def test_fp_without_evidence_is_downgraded():
         return types.SimpleNamespace(choices=[types.SimpleNamespace(message=msg)])
     client = types.SimpleNamespace(
         chat=types.SimpleNamespace(completions=types.SimpleNamespace(create=create)))
-    from agentboard.agents.gap_auditor import GapAuditor
-    from agentboard.review import ReviewFinding
+    from edgeverdict.agents.gap_auditor import GapAuditor
+    from edgeverdict.review import ReviewFinding
     a = GapAuditor(model="gpt-5.5", client=client)
     f = ReviewFinding(behavior="x", status="confirmed_gap",
                       test_code="test('t',()=>{})", observed="AssertionError: expected /foobar to be /foo/foobar")
@@ -155,8 +155,8 @@ def test_fp_without_evidence_is_downgraded():
 def test_empty_reason_triggers_one_retry():
     import json as _json
     import types
-    from agentboard.agents.gap_auditor import GapAuditor
-    from agentboard.review import ReviewFinding
+    from edgeverdict.agents.gap_auditor import GapAuditor
+    from edgeverdict.review import ReviewFinding
     seq = [
         {"assessment": "uncertain", "reason": "", "evidence": ""},
         {"assessment": "likely_real", "reason": "drops the field", "evidence": "line 12 skips it"},

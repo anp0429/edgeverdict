@@ -13,7 +13,7 @@ back to 9 otherwise.
 import json
 import os
 
-from agentboard.config import Config, build_profile, detect_pnpm_version
+from edgeverdict.config import Config, build_profile, detect_pnpm_version
 
 
 def _repo(tmp_path, package_json: dict, lockfile: bool = True):
@@ -90,7 +90,7 @@ def test_no_lockfile_repo_installs_unfrozen(tmp_path):
 
 
 def test_unfrozen_install_swaps_only_the_flag():
-    from agentboard.verifiers.vitest_verifier import unfrozen_install
+    from edgeverdict.verifiers.vitest_verifier import unfrozen_install
 
     frozen = ["npx", "-y", "pnpm@9", "install", "--frozen-lockfile"]
     assert unfrozen_install(frozen) == [
@@ -106,8 +106,8 @@ def test_frozen_install_failure_falls_back_with_a_note(tmp_path):
     # one printed line saying so), never bench it as an env failure.
     import subprocess
 
-    from agentboard.verifiers.finding_verifier import FindingVerifier
-    from agentboard.verifiers.vitest_verifier import RepoProfile
+    from edgeverdict.verifiers.finding_verifier import FindingVerifier
+    from edgeverdict.verifiers.vitest_verifier import RepoProfile
 
     repo = str(tmp_path / "repo")
     os.makedirs(os.path.join(repo, "tests"))

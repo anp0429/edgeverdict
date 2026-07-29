@@ -1,7 +1,7 @@
 """Config must be loadable without ever touching the reviewed repo.
 
-Regression for a real dogfooding papercut: `agentboard init` wrote
-.agentboard.toml into a repo being drive-by reviewed (zod), and the
+Regression for a real dogfooding papercut: `edgeverdict init` wrote
+.edgeverdict.toml into a repo being drive-by reviewed (zod), and the
 untracked file tripped that repo's pre-push hook. Reviewing a repo you
 don't own has to leave its working tree byte-for-byte untouched, so config
 can now come from an explicit --config path or from a per-repo file in the
@@ -11,7 +11,7 @@ import os
 
 import pytest
 
-from agentboard.config import CONFIG_NAME, ConfigError, load_config, user_config_path
+from edgeverdict.config import CONFIG_NAME, ConfigError, load_config, user_config_path
 
 
 def _write(path, text):
@@ -61,7 +61,7 @@ def test_missing_config_is_a_friendly_exit_at_the_api_boundary(tmp_path):
     # The boundary contract: the same friendly message the SystemExit used
     # to carry, narrated through the log sink, and exit code 1 — the review
     # could not run, but nobody's process dies.
-    from agentboard.api import ReviewRequest, run_review
+    from edgeverdict.api import ReviewRequest, run_review
 
     repo = tmp_path / "myrepo"
     os.makedirs(repo)
@@ -89,11 +89,11 @@ def test_user_config_path_is_outside_the_repo(tmp_path, monkeypatch):
     repo = str(tmp_path / "somerepo")
     path = user_config_path(repo)
     assert not path.startswith(repo)
-    assert path.endswith(os.path.join("agentboard", "repos", "somerepo.toml"))
+    assert path.endswith(os.path.join("edgeverdict", "repos", "somerepo.toml"))
 
 
 def test_init_user_writes_outside_the_repo(tmp_path, monkeypatch):
-    from agentboard.cli import main
+    from edgeverdict.cli import main
 
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg"))
     repo = tmp_path / "visited"

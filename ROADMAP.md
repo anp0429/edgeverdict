@@ -58,7 +58,7 @@ break the core thesis.
 ## Next
 
 - [ ] **`prove` (0.5.0 headline).** The author-side verb, caveman-simple: an
-  agent (or you) wrote code, `agentboard prove` tries to break it, and the
+  agent (or you) wrote code, `edgeverdict prove` tries to break it, and the
   output is one line first: `BROKEN: N failing tests, M attempts` or
   `HELD: M executed attempts, 0 broke it`, evidence below. Zero required
   flags: dirty tree reviews the working tree, clean tree reviews the branch

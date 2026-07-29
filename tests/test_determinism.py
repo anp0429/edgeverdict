@@ -1,6 +1,6 @@
 """The determinism harness.
 
-agentboard's product claim is that no model — and nothing else
+edgeverdict's product claim is that no model — and nothing else
 nondeterministic — sits in the accept/reject path. This file is where that
 claim stops being prose:
 
@@ -23,9 +23,9 @@ import os
 import random
 import tempfile
 
-from agentboard.fingerprint import verdict_fingerprint, verdict_summary
-from agentboard.review import ReviewFinding, ReviewRun
-from agentboard.verifiers.finding_verifier import FindingVerifier
+from edgeverdict.fingerprint import verdict_fingerprint, verdict_summary
+from edgeverdict.review import ReviewFinding, ReviewRun
+from edgeverdict.verifiers.finding_verifier import FindingVerifier
 
 N = 1000
 

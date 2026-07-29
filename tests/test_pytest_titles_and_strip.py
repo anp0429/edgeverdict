@@ -5,7 +5,7 @@ class-nested tests get class-qualified node titles so serial execution
 selects the exact collected testcase; and injection may deduplicate only
 column-0 imports, because an indented import is part of a test body."""
 
-from agentboard.verifiers.pytest_harness import PytestHarness
+from edgeverdict.verifiers.pytest_harness import PytestHarness
 
 
 H = PytestHarness()

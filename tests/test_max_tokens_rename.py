@@ -9,7 +9,7 @@ max_tokens."""
 
 import pytest
 
-from agentboard.providers import chat_completion
+from edgeverdict.providers import chat_completion
 
 
 class _Rejecting:

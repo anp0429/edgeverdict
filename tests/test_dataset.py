@@ -7,13 +7,13 @@ never allowed to overwrite that fact.
 
 import json
 
-from agentboard.dataset import (
+from edgeverdict.dataset import (
     _ran,
     append_run,
     backfill_from_json_out,
     finding_row,
 )
-from agentboard.review import ReviewFinding, ReviewRun
+from edgeverdict.review import ReviewFinding, ReviewRun
 
 
 def test_ran_is_the_execution_fact():

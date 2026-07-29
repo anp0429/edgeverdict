@@ -1,6 +1,6 @@
-# agentboard
+# edgeverdict
 
-[![CI](https://github.com/anp0429/agentboard/actions/workflows/ci.yml/badge.svg)](https://github.com/anp0429/agentboard/actions/workflows/ci.yml)
+[![CI](https://github.com/anp0429/edgeverdict/actions/workflows/ci.yml/badge.svg)](https://github.com/anp0429/edgeverdict/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
 A review gate that proposes edge cases and executes them before
@@ -22,14 +22,14 @@ verb for pull requests and CI: same engine, always-advisory exit codes.
 Nobody is replaced at either end.
 
 ```
-agentboard prove
-agentboard review --target src/parser.ts --intent "handle empty input"
+edgeverdict prove
+edgeverdict review --target src/parser.ts --intent "handle empty input"
 ```
 
 ## Why
 
 LLM code reviewers read a diff and return an opinion. There is nothing to
-check the opinion against. agentboard's verdict is an executed test: it
+check the opinion against. edgeverdict's verdict is an executed test: it
 passed, it failed, it did not compile, or it timed out. Every reported gap
 comes with a test you can run yourself and watch fail.
 
@@ -38,20 +38,21 @@ comes with a test you can run yourself and watch fail.
 Install (Python 3.11+):
 
 ```
-pip install reviewgate
+pip install edgeverdict
 ```
 
-The package is `reviewgate` and the command is `agentboard`: the project is
-named agentboard, but that name was already taken on PyPI, so the package
-ships under the gate's job description instead.
+The package and the command are both `edgeverdict`. Before July 2026 the
+project was named agentboard and the package shipped as `reviewgate`; it now
+lives under one name. Old repository links redirect, and files under
+`notes/` keep the old names as written at the time.
 
 Or from source for development: `pip install -e ".[dev]"`.
 
 The demo runs without an API key:
 
 ```
-agentboard demo
-agentboard demo --fixed
+edgeverdict demo
+edgeverdict demo --fixed
 ```
 
 It gates a small bundled project with one planted bug. Proposals are
@@ -63,12 +64,12 @@ run needs `OPENAI_API_KEY` (reviewer) and, for the advisory auditor,
 Then, in any repo with uncommitted work or a feature branch:
 
 ```
-agentboard prove
+edgeverdict prove
 ```
 
 ## Usage
 
-Add an `.agentboard.toml` at your repo root, or skip it: the profile is
+Add an `.edgeverdict.toml` at your repo root, or skip it: the profile is
 auto-detected from your lockfile.
 
 ```toml
@@ -77,16 +78,16 @@ project = "unit"
 harness_notes = "Tests already import the framework; reuse existing helpers."
 ```
 
-Reviewing a repo you don't own? agentboard never needs to write into it.
-Run `agentboard init --user` to keep the config in your user dir
-(`~/.config/agentboard/repos/<repo>.toml`), or pass `--config path.toml`
+Reviewing a repo you don't own? edgeverdict never needs to write into it.
+Run `edgeverdict init --user` to keep the config in your user dir
+(`~/.config/edgeverdict/repos/<repo>.toml`), or pass `--config path.toml`
 explicitly. The review itself also leaves the tree untouched: the board and
 all run artifacts default to the system temp dir.
 
 Review a change before pushing:
 
 ```
-agentboard review --repo . --target src/parser.ts --intent "handle empty input"
+edgeverdict review --repo . --target src/parser.ts --intent "handle empty input"
 ```
 
 Defaults: head is your current branch, base is its fork point, and the tests
@@ -119,7 +120,7 @@ fix, rather than gating a phantom.
 Add files explicitly:
 
 ```
-agentboard review --target src/parser.ts --also src/lexer.ts --also src/ast.ts:tests/ast.test.ts
+edgeverdict review --target src/parser.ts --also src/lexer.ts --also src/ast.ts:tests/ast.test.ts
 ```
 
 `--also` is repeatable. Tests are auto-detected per file; pass `file:tests`
@@ -128,7 +129,7 @@ to override. Files with no findable tests are skipped with a note.
 Or select files by the blast radius of the change:
 
 ```
-agentboard review --target src/parser.ts --scope all --depth 2
+edgeverdict review --target src/parser.ts --scope all --depth 2
 ```
 
 `--scope` computes which files a change impacts, using
@@ -156,14 +157,14 @@ everything that passed or was already covered is collapsed. It is advisory
 by design: gaps never fail the build, nothing is auto-approved, and the
 decision stays with a human at both ends.
 
-The workflow lives at `.github/workflows/agentboard-review.yml` with the
+The workflow lives at `.github/workflows/edgeverdict-review.yml` with the
 comment renderer at `scripts/render_pr_comment.py`. It picks the first
 changed source file in the PR, skips quietly when a PR changes no reviewable
 code, and skips fork PRs entirely (repository secrets are withheld from
 forks, so the model key is unavailable there; that is correct, not a bug).
 
 This repository runs it on itself:
-[PR #1](https://github.com/anp0429/agentboard/pull/1) is agentboard
+[PR #1](https://github.com/anp0429/edgeverdict/pull/1) is edgeverdict
 reviewing its own pull request, finding the demo's planted bug through three
 functions with an executed failing test for each.
 
@@ -187,20 +188,20 @@ Install with pipx so the server binary lands on your PATH regardless of
 which environment your agent runs in:
 
 ```
-pipx install "reviewgate[mcp]"
+pipx install "edgeverdict[mcp]"
 ```
 
 For Claude Code:
 
 ```
-claude mcp add agentboard -- agentboard-mcp
+claude mcp add edgeverdict -- edgeverdict-mcp
 ```
 
 If you installed into a plain venv instead of pipx, register with the
 absolute path, since the agent's shell will not have your venv activated:
 
 ```
-claude mcp add agentboard -- /path/to/venv/bin/agentboard-mcp
+claude mcp add edgeverdict -- /path/to/venv/bin/edgeverdict-mcp
 ```
 
 If your agent asks what this server is before adding it, the Trust and
@@ -209,7 +210,7 @@ provenance section below is a paste-ready answer.
 For any other MCP client (Cursor, etc.), the server config is:
 
 ```json
-{ "agentboard": { "command": "agentboard-mcp" } }
+{ "edgeverdict": { "command": "edgeverdict-mcp" } }
 ```
 
 This exposes two tools. `prove` is the agent's loop verb: hand it a repo
@@ -243,7 +244,7 @@ test fails if the two ever accept different flags. There is no logic in the
 server that the CLI does not have.
 
 Where the code lives: source is this repository, and the package is
-`reviewgate` on PyPI. What you install is what you can read.
+`edgeverdict` on PyPI. What you install is what you can read.
 
 What it touches: tests execute locally, in a worktree sandbox of your
 repository. Network calls go to exactly two places: the model provider you
@@ -258,8 +259,8 @@ handed back to the calling agent and ultimately to a human.
 If your agent asks "what is this MCP server?", this is the paste-ready
 answer:
 
-> agentboard-mcp is the MCP adapter for reviewgate (PyPI), source at
-> github.com/anp0429/agentboard. It runs generated edge-case tests locally
+> edgeverdict-mcp is the MCP adapter for edgeverdict (PyPI), source at
+> github.com/anp0429/edgeverdict. It runs generated edge-case tests locally
 > in a worktree sandbox and returns advisory verdicts; it never approves or
 > blocks on its own. Network access is limited to the model provider key
 > the user configured and the GitHub API for PR intent. The server is a
@@ -338,7 +339,7 @@ export OPENAI_API_KEY=sk-or-...
 ```
 
 ```toml
-# .agentboard.toml
+# .edgeverdict.toml
 reviewer_model = "qwen3.6:27b"            # or "moonshotai/kimi-k2.6", etc.
 critic_model = "devstral-small-2"         # a different lineage decorrelates
 base_url = "http://localhost:11434/v1"    # optional: pin this repo's endpoint
@@ -426,7 +427,7 @@ reproducible by hand.
 
 ## Benchmark
 
-[BENCHMARK.md](BENCHMARK.md) measures the harder question: can agentboard
+[BENCHMARK.md](BENCHMARK.md) measures the harder question: can edgeverdict
 find a real bug in code it has never seen, from an intent that does not name
 the bug? It runs at the parent commit of recent merged bugfix PRs, with a
 neutral intent, and scores against the fix.
@@ -448,13 +449,13 @@ executed verdict. `--dataset` appends one JSONL row per finding to a growing
 corpus.
 
 ```
-agentboard review --target src/parser.ts --intent "handle empty input" --dataset
+edgeverdict review --target src/parser.ts --intent "handle empty input" --dataset
 ```
 
 Each row stores the proposal and the executed verdict. The honest label is
 `ran` (did the test execute), derived only from the gate's status; the
 advisory audit is stored alongside but never overwrites it. Collection is
-opt-in and append-only, writing to `~/.agentboard/dataset.jsonl` by default.
+opt-in and append-only, writing to `~/.edgeverdict/dataset.jsonl` by default.
 Existing `--json-out` artifacts can be backfilled, so a corpus can start from
 runs that predate the collector (the benchmark seeds ~260 rows on its own).
 
@@ -466,7 +467,7 @@ never comingled, by design.
 
 The collaboration-loop code that predates the gate (fix agents proposing
 patches, multi-model argument with executed tests as referee) lives under
-`agentboard.experimental` pending that roadmap.
+`edgeverdict.experimental` pending that roadmap.
 
 ## Reliability
 
@@ -506,7 +507,7 @@ is dropped.
   experimental.
 - Current vitest is the supported target. Very old checkouts (vitest 0.2x
   era) tend to fail at environment preparation for toolchain reasons that
-  predate agentboard; the run reports this as an environment failure rather
+  predate edgeverdict; the run reports this as an environment failure rather
   than producing verdicts.
 - pnpm repos run under the version the repo's own config parses: the
   `packageManager` pin is honored when modern (>= 9); with no pin there, a
@@ -519,7 +520,7 @@ is dropped.
 - Monorepos with multiple vitest projects usually work unscoped now (the
   environment probe and the proposals run beside the resolved tests file,
   inside whichever project owns it — zod's workspace gates unscoped). A
-  one-line `.agentboard.toml` naming the `project` or `filter` remains the
+  one-line `.edgeverdict.toml` naming the `project` or `filter` remains the
   right call when a repo boots special environments (browser projects,
   custom pools), the same way you would scope CI.
 

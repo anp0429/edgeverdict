@@ -11,7 +11,7 @@ fail — the gate does not un-say that), and distinct messages are never
 merged.
 """
 
-from agentboard.review import ReviewFinding, flag_systematic_artifacts
+from edgeverdict.review import ReviewFinding, flag_systematic_artifacts
 
 
 def _gap(msg: str) -> ReviewFinding:

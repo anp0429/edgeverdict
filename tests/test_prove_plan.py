@@ -9,14 +9,14 @@ import subprocess
 
 import pytest
 
-from agentboard.prove import (
+from edgeverdict.prove import (
     ProvePlan,
     exit_code_for,
     llm_configured,
     plan_prove,
     verdict_block,
 )
-from agentboard.review import ReviewFinding, ReviewRun
+from edgeverdict.review import ReviewFinding, ReviewRun
 
 
 def _git(repo, *args):
@@ -153,16 +153,16 @@ def test_stopped_runs_exit_nonzero_matching_their_verdict():
 
 
 def test_prove_board_path_is_per_verb_and_non_overwriting():
-    from agentboard.prove import prove_board_path
+    from edgeverdict.prove import prove_board_path
     a = prove_board_path(now=1000000000)
     b = prove_board_path(now=1000000060)
-    assert "agentboard_prove_board_" in a
+    assert "edgeverdict_prove_board_" in a
     assert a.endswith(".html")
     assert a != b
 
 
 def test_verdict_from_counts_matches_the_run_path():
-    from agentboard.prove import verdict_from_counts
+    from edgeverdict.prove import verdict_from_counts
     run = _run(confirmed_gap=2, handled=7, broken_test=3)
     counts = {"confirmed_gap": 2, "handled": 7, "broken_test": 3}
     assert verdict_from_counts(counts) == verdict_block(run)
@@ -172,7 +172,7 @@ def test_verdict_from_counts_matches_the_run_path():
 
 
 def test_verdict_from_counts_tolerates_missing_and_unknown_keys():
-    from agentboard.prove import verdict_from_counts
+    from edgeverdict.prove import verdict_from_counts
     assert verdict_from_counts({}).startswith("STOPPED: nothing was proposed")
     line = verdict_from_counts({"handled": 1, "mystery_status": 9})
     assert line.startswith("HELD: 1 executed attempts")
@@ -183,7 +183,7 @@ def test_declaration_files_are_never_targets(tmp_path):
     # run; type declarations have no runtime behavior to break
     import subprocess
 
-    from agentboard.config import targets_from_diff
+    from edgeverdict.config import targets_from_diff
     r = str(tmp_path)
     for cmd in (["init", "-q", "-b", "main"],
                 ["config", "user.email", "t@t"],
@@ -208,7 +208,7 @@ def test_tests_from_diff_is_worktree_aware(tmp_path):
     # diffed nothing, losing a test file the change itself had named
     import subprocess
 
-    from agentboard.api import _tests_from_diff
+    from edgeverdict.api import _tests_from_diff
     r = str(tmp_path)
     for cmd in (["init", "-q", "-b", "main"],
                 ["config", "user.email", "t@t"],
@@ -231,7 +231,7 @@ def test_from_namespace_tolerates_missing_new_fields():
     # flag crashed from_namespace while direct-construction tests passed
     import argparse
 
-    from agentboard.api import ReviewRequest
+    from edgeverdict.api import ReviewRequest
     ns = argparse.Namespace(repo=".", target="a.py", tests="t.py",
                             intent="x")
     req = ReviewRequest.from_namespace(ns)
@@ -240,7 +240,7 @@ def test_from_namespace_tolerates_missing_new_fields():
 
 
 def test_review_parser_accepts_no_repair(monkeypatch):
-    import agentboard.cli as cli
+    import edgeverdict.cli as cli
     seen: dict = {}
     monkeypatch.setattr(cli, "review",
                         lambda args: seen.update(vars(args)) or 0)

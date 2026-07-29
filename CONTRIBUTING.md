@@ -1,6 +1,6 @@
-# Contributing to agentboard
+# Contributing to edgeverdict
 
-Thanks for looking. agentboard is a review gate with one non-negotiable idea:
+Thanks for looking. edgeverdict is a review gate with one non-negotiable idea:
 **a model may propose, but only executed tests decide.** Contributions are
 welcome as long as they hold that line.
 
@@ -30,8 +30,8 @@ falsifier invariants (an impossible test must always read as a real failure).
 ## Development
 
 ```
-git clone https://github.com/anp0429/agentboard
-cd agentboard
+git clone https://github.com/anp0429/edgeverdict
+cd edgeverdict
 pip install -e ".[dev]"
 PYTHONPATH=src python -m pytest tests/ -q
 ```
@@ -39,8 +39,8 @@ PYTHONPATH=src python -m pytest tests/ -q
 The demo runs with no API key and exercises the deterministic gate:
 
 ```
-agentboard demo
-agentboard demo --fixed
+edgeverdict demo
+edgeverdict demo --fixed
 ```
 
 A live review needs `OPENAI_API_KEY` (reviewer) and, for the auditor,
@@ -58,7 +58,7 @@ those; the Python test suite does not need it.
 
 ## What is especially welcome
 
-- New `RepoProfile` presets or `.agentboard.toml` recipes for repos that need
+- New `RepoProfile` presets or `.edgeverdict.toml` recipes for repos that need
   scoping (multiple vitest projects, per-package monorepos).
 - A pytest gate (the current gate is vitest-only; `PytestVerifier` exists but
   speaks the older protocol).

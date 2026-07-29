@@ -9,7 +9,7 @@ only a named AssertionError is an assertion; everything else that isn't a
 timeout is the test's problem, not the tool's.
 """
 
-from agentboard.verifiers.finding_verifier import FindingVerifier
+from edgeverdict.verifiers.finding_verifier import FindingVerifier
 
 
 def _kind(message: str) -> str:

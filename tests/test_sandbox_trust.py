@@ -16,11 +16,11 @@ from __future__ import annotations
 
 import os
 
-from agentboard.verifiers.finding_verifier import (
+from edgeverdict.verifiers.finding_verifier import (
     FindingVerifier,
     _copy_discrepancies,
 )
-from agentboard.verifiers.vitest_verifier import RepoProfile
+from edgeverdict.verifiers.vitest_verifier import RepoProfile
 
 
 # ---------------------------------------------------------------------------
@@ -141,7 +141,7 @@ def test_presets_declare_a_probe():
 # ---------------------------------------------------------------------------
 
 def test_env_failure_is_a_run_level_banner(tmp_path):
-    from agentboard.review import ReviewFinding, ReviewRun, render_review_html
+    from edgeverdict.review import ReviewFinding, ReviewRun, render_review_html
 
     repo = _repo_with_tests_file(tmp_path)
     v = FindingVerifier(repo, _profile(["false"]), "tests/suite.test.ts")
@@ -164,7 +164,7 @@ def test_env_failure_is_a_run_level_banner(tmp_path):
 # ---------------------------------------------------------------------------
 
 def test_inject_into_describe_file_goes_inside_the_block():
-    from agentboard.verifiers.finding_verifier import _inject
+    from edgeverdict.verifiers.finding_verifier import _inject
     pristine = 'import x\n\ndescribe("d", () => {\n  test("a", () => {});\n});\n'
     out, err = _inject(pristine, 'test("new", () => {});')
     assert err == ""
@@ -172,7 +172,7 @@ def test_inject_into_describe_file_goes_inside_the_block():
 
 
 def test_inject_into_toplevel_file_appends_at_eof_never_nests():
-    from agentboard.verifiers.finding_verifier import _inject
+    from edgeverdict.verifiers.finding_verifier import _inject
     pristine = (
         'import x\n\n'
         'test("a", () => {\n  expect(1).toBe(1);\n});\n\n'
@@ -187,7 +187,7 @@ def test_inject_into_toplevel_file_appends_at_eof_never_nests():
 def test_inject_strips_proposal_imports():
     """Proposals ride inside a host file; their own imports are illegal there
     and killed three zod findings via whole-file transform failure."""
-    from agentboard.verifiers.finding_verifier import _inject
+    from edgeverdict.verifiers.finding_verifier import _inject
     pristine = 'import x\n\ntest("a", () => {});\n'
     proposal = (
         'import { expect, test } from "vitest";\n'
@@ -202,7 +202,7 @@ def test_inject_strips_proposal_imports():
 
 
 def test_inject_strips_multiline_imports():
-    from agentboard.verifiers.finding_verifier import _inject
+    from edgeverdict.verifiers.finding_verifier import _inject
     pristine = 'test("a", () => {});\n'
     proposal = (
         'import {\n  expect,\n  test,\n} from "vitest";\n'
@@ -218,7 +218,7 @@ def test_inject_into_semicolonless_describe_file():
     """prettier semi:false repos close describe with `})` not `});` —
     zustand was the repo that surfaced this. Injection must land inside
     the block, exactly as it does for the semicolon style."""
-    from agentboard.verifiers.finding_verifier import _inject
+    from edgeverdict.verifiers.finding_verifier import _inject
 
     pristine = (
         "import { it } from 'vitest'\n"
@@ -262,7 +262,7 @@ def test_install_timeout_is_a_run_level_banner(tmp_path, monkeypatch):
     never per-finding noise."""
     import subprocess
 
-    from agentboard.review import ReviewFinding, ReviewRun
+    from edgeverdict.review import ReviewFinding, ReviewRun
 
     repo = _repo_with_tests_file(tmp_path)
 
@@ -283,7 +283,7 @@ def test_install_timeout_is_a_run_level_banner(tmp_path, monkeypatch):
 def test_smoke_noise_strip_peels_the_label_before_filtering():
     # the prefix bug: "stderr: npm warn ..." doesn't START with "npm warn",
     # so the first filter kept everything and the real cause stayed buried
-    from agentboard.verifiers.finding_verifier import _strip_pm_noise
+    from edgeverdict.verifiers.finding_verifier import _strip_pm_noise
     tail = ("stderr: npm warn Unknown env config \"store-dir\".\n"
             "npm notice something\n"
             "Error: Cannot find module 'vitest'")

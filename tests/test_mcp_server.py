@@ -15,8 +15,8 @@ import pytest
 
 pytest.importorskip("mcp", reason="MCP extra not installed")
 
-from agentboard import mcp_server  # noqa: E402
-from agentboard.api import ReviewRequest, ReviewResult  # noqa: E402
+from edgeverdict import mcp_server  # noqa: E402
+from edgeverdict.api import ReviewRequest, ReviewResult  # noqa: E402
 
 
 def _fake_run_review(doc=None, rc=0, chatty=True):
@@ -73,7 +73,7 @@ def test_request_covers_every_cli_review_flag(monkeypatch):
     the namespace and ReviewRequest's fields (both directions: a flag with
     no field silently diverges the adapters; a field with no flag is dead
     API surface the CLI can never reach)."""
-    import agentboard.cli as cli
+    import edgeverdict.cli as cli
 
     captured = {}
     monkeypatch.setattr(cli, "review", lambda ns: captured.setdefault("ns", ns) and 0 or 0)
@@ -103,7 +103,7 @@ def test_prove_tool_is_registered_beside_review():
     Registration only — the body lives in _prove, exercised directly below
     the way review's helpers are, because the decorated object's call
     surface belongs to the framework."""
-    import agentboard.mcp_server as srv
+    import edgeverdict.mcp_server as srv
     assert getattr(srv, "prove", None) is not None
     assert getattr(srv, "review", None) is not None
     assert callable(srv._prove)
@@ -114,7 +114,7 @@ def test_prove_tool_asks_for_intent_on_uncommitted_work(monkeypatch, tmp_path):
     never a review run with an empty intent."""
     import subprocess
 
-    import agentboard.mcp_server as srv
+    import edgeverdict.mcp_server as srv
     r = str(tmp_path)
     for cmd in (["init", "-q", "-b", "main"],
                 ["config", "user.email", "t@t"],

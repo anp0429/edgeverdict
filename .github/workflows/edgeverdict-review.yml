@@ -1,0 +1,113 @@
+name: edgeverdict review
+
+# Advisory pre-merge review: an LLM proposes edge-case tests, a deterministic
+# gate executes them against this PR's code, and the evidence lands as a PR
+# comment. Never blocking: confirmed gaps live in the comment, not the exit
+# code. A human decides.
+#
+# Fork PRs are skipped by design: they cannot access OPENAI_API_KEY (repo
+# secrets are withheld from forks), and that is correct; do not work around
+# it.
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  review:
+    # Same-repo PRs only: forks have no access to the key.
+    if: github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.sha }}
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Install edgeverdict
+        # In edgeverdict's own repo this installs the PR's code with its dev
+        # extras (true dogfooding — the pytest harness needs pytest present,
+        # since the pytest profile assumes a provisioned environment); in any
+        # other repo the local install fails fast and the fallback pulls the
+        # published tool plus a runner.
+        run: pip install -e ".[dev]" 2>/dev/null || pip install pytest git+https://github.com/anp0429/edgeverdict
+
+      - name: Pick a reviewable target from the PR's changed files
+        id: target
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        # The workflow picks only the TARGET. Tests resolution belongs to
+        # the library (ast import matching, diff fallback, dir fallback):
+        # a duplicated grep picker here rotted the moment the library
+        # improved, and fed the gate a tests file that collected nothing
+        # (the Jul 22 smoke failure). One core, thin adapters; adapters
+        # never carry a copy of core logic. src/ files are preferred.
+        run: |
+          changed=$(git diff --name-only "$BASE_SHA...$HEAD_SHA" \
+            | grep -E '\.(ts|tsx|js|jsx|mjs|py)$' \
+            | grep -vE '\.test\.|\.spec\.|/tests?/|__tests__|__init__\.py|conftest|^examples/|^scripts/' \
+            || true)
+          ordered=$( { printf '%s\n' "$changed" | grep '^src/' || true; \
+                       printf '%s\n' "$changed" | grep -v '^src/' || true; } )
+          target=$(printf '%s\n' "$ordered" | head -1)
+          echo "target=$target" >> "$GITHUB_OUTPUT"
+          if [ -n "$target" ]; then
+            echo "picked: ${target} (tests file resolved by the library)"
+          else
+            echo "No changed source file; skipping quietly."
+          fi
+
+      - name: Review
+        if: steps.target.outputs.target != ''
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          # Filenames are PR-controlled data. Passing through env (not inline
+          # expression interpolation) keeps shell metacharacters inert.
+          TARGET: ${{ steps.target.outputs.target }}
+        run: |
+          edgeverdict review \
+            --repo . \
+            --target "$TARGET" \
+            --base "$BASE_SHA" \
+            --head "$HEAD_SHA" \
+            --json-out edgeverdict-run.json \
+            --board edgeverdict-board.html
+
+      - name: Render comment
+        if: steps.target.outputs.target != ''
+        run: python3 scripts/render_pr_comment.py edgeverdict-run.json > edgeverdict-comment.md
+
+      - name: Post or update the sticky comment
+        if: steps.target.outputs.target != ''
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require("fs");
+            const body = fs.readFileSync("edgeverdict-comment.md", "utf8");
+            const marker = "<!-- edgeverdict-review -->";
+            const { owner, repo } = context.repo;
+            const issue_number = context.payload.pull_request.number;
+            const { data: comments } = await github.rest.issues.listComments(
+              { owner, repo, issue_number, per_page: 100 });
+            const mine = comments.find(c => c.body && c.body.includes(marker));
+            if (mine) {
+              await github.rest.issues.updateComment(
+                { owner, repo, comment_id: mine.id, body });
+            } else {
+              await github.rest.issues.createComment(
+                { owner, repo, issue_number, body });
+            }

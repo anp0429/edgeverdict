@@ -12,13 +12,13 @@ from __future__ import annotations
 
 import os
 
-from agentboard.verifiers.harness import (
+from edgeverdict.verifiers.harness import (
     VitestHarness,
     harness_for_profile,
     harness_for_target,
 )
-from agentboard.verifiers.pytest_harness import PytestHarness
-from agentboard.verifiers.vitest_verifier import RepoProfile
+from edgeverdict.verifiers.pytest_harness import PytestHarness
+from edgeverdict.verifiers.vitest_verifier import RepoProfile
 
 H = PytestHarness()
 
@@ -329,7 +329,7 @@ def test_discovery_falls_back_to_colocated_name(tmp_path):
 
 
 def test_api_dispatches_py_targets_to_the_pytest_harness(tmp_path):
-    from agentboard.api import _default_tests_for
+    from edgeverdict.api import _default_tests_for
     _touch(tmp_path, "order_tool.py")
     _touch(tmp_path, "test_order_tool.py")
     assert _default_tests_for(str(tmp_path), "order_tool.py") == "test_order_tool.py"
@@ -358,7 +358,7 @@ def test_harness_for_target_selects_by_extension():
 # ---------------------------------------------------------------------------
 
 def test_detect_profile_kind_learns_pytest(tmp_path):
-    from agentboard.config import detect_profile_kind
+    from edgeverdict.config import detect_profile_kind
     d = str(tmp_path)
     assert detect_profile_kind(d) == ""
     _touch(tmp_path, "pyproject.toml")
@@ -369,7 +369,7 @@ def test_detect_profile_kind_learns_pytest(tmp_path):
 
 
 def test_detect_profile_kind_pytest_ini_and_setup_cfg(tmp_path):
-    from agentboard.config import detect_profile_kind
+    from edgeverdict.config import detect_profile_kind
     a = tmp_path / "a"
     a.mkdir()
     _touch(a, "pytest.ini")
@@ -387,7 +387,7 @@ def test_detect_profile_kind_pytest_ini_and_setup_cfg(tmp_path):
 def test_build_profile_python_shape(tmp_path):
     import sys
 
-    from agentboard.config import Config, build_profile
+    from edgeverdict.config import Config, build_profile
     _touch(tmp_path, "pyproject.toml")
     prof = build_profile(str(tmp_path), Config(), "tests/test_x.py")
     assert prof.kind == "pytest"

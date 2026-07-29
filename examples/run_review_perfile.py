@@ -19,12 +19,12 @@ verified the same deterministic way.
 """
 import os
 
-from agentboard.ingestion.intent import resolve_intent
-from agentboard.ingestion.pr_diff import load_pr_diff
-from agentboard.agents.reviewer_agent import ReviewerAgent
-from agentboard.verifiers.finding_verifier import FindingVerifier
-from agentboard.verifiers.vitest_verifier import RepoProfile
-from agentboard.review import ReviewRun, render_review_html
+from edgeverdict.ingestion.intent import resolve_intent
+from edgeverdict.ingestion.pr_diff import load_pr_diff
+from edgeverdict.agents.reviewer_agent import ReviewerAgent
+from edgeverdict.verifiers.finding_verifier import FindingVerifier
+from edgeverdict.verifiers.vitest_verifier import RepoProfile
+from edgeverdict.review import ReviewRun, render_review_html
 
 CLONE = os.environ.get("CLONE", "/path/to/your/clone")
 TESTS = "packages/mcp-server-supabase/src/server.test.ts"

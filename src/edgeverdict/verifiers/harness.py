@@ -1,0 +1,654 @@
+"""The framework seam of the gate: everything a test framework decides.
+
+FindingVerifier owns the *gate semantics* — warm sandbox, batch-then-serial
+fallback, the four-verdict contract, and the conservative "no minted gaps"
+rule. What it must NOT own is any opinion about vitest, because the next
+repo is a pytest repo and the verdict logic is framework-independent by
+design. This module names the boundary:
+
+    RepoProfile  = repo facts       (install/build/test commands, env, smoke)
+    Harness      = framework facts  (how to inject a test, how to name it,
+                                     how to filter a run to it, how to read
+                                     the runner's output, what a genuine
+                                     assertion failure looks like)
+
+A Harness answers exactly the questions the verifier asks per finding:
+
+    inject          proposal code into the pristine tests file (PURE)
+    strip_imports   the injection-legality rule for proposal imports
+    test_title      the name the runner will know the proposal by
+    mark_title      stamp a gate-owned mark into that name (batch attribution)
+    serial_command  run ONLY one titled test, results to a file
+    batch_command   run ONLY mark-stamped tests, results to a file
+    read_verdict    one serial run's output -> (status, observed)
+    read_batch      one batched run's output -> neutral per-test records
+    classify_failure one failure message -> assertion | timeout | load_error
+    default_tests_for the framework's test-file naming conventions
+
+The classification hook is the load-bearing one: a confirmed_gap may only
+ever come from a named assertion failure, and each framework spells its
+assertion layer differently. The vitest spelling lives here now, moved
+byte-for-byte from finding_verifier so the e2e fingerprint tests stay the
+oracle that nothing observable changed.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import re
+from abc import ABC, abstractmethod
+from dataclasses import dataclass
+
+from ..review import Status
+
+
+@dataclass
+class BatchResult:
+    """One executed test from a batched run, framework-neutral.
+
+    The verifier's attribution logic (mark matching, verdict priority) works
+    on these records only, so it cannot grow a framework dependency back.
+    `status` values other than passed/failed mean "did not properly run" —
+    the verifier leaves those findings for the serial path to decide."""
+
+    title: str    # the name the runner reported (carries the gate's mark)
+    status: str   # "passed" | "failed" | anything else = did not run
+    failure: str  # first failure message, "" when none
+
+
+class Harness(ABC):
+    """Framework facts, named instead of assumed. See the module docstring
+    for the contract each method fulfills."""
+
+    name: str = ""
+    # source-file extensions this framework's repos use; drives dispatch in
+    # default-tests discovery (api._default_tests_for).
+    src_suffixes: tuple[str, ...] = ()
+    # runner artifact filename, written into the sandbox repo root
+    result_file: str = ""
+
+    @abstractmethod
+    def inject(self, pristine: str, test_code: str,
+               host_path: str | None = None) -> tuple[str | None, str]:
+        """Proposal code into the pristine tests-file content (PURE).
+        Returns (new_content, "") or (None, reason)."""
+
+    @abstractmethod
+    def strip_imports(self, test_code: str, pristine: str = "") -> str:
+        """Apply the framework's rule for proposal-carried imports before
+        injection. `pristine` is the host file, for rules that depend on
+        what is already imported there."""
+
+    @abstractmethod
+    def test_title(self, test_code: str) -> str | None:
+        """The name the runner will report the proposal's test under, or
+        None when none can be read (-> broken_test / serial skip)."""
+
+    @abstractmethod
+    def mark_title(self, test_code: str, mark: str) -> str | None:
+        """Stamp `mark` into the proposal's test name so a batched run can
+        be attributed. Returns marked code, or None when no test opener was
+        found (the finding then falls back to the serial path)."""
+
+    @abstractmethod
+    def serial_command(self, profile, tests_file: str, title: str,
+                       out: str) -> list[str]:
+        """The runner invocation for ONE titled test, machine-readable
+        results written to `out`."""
+
+    @abstractmethod
+    def batch_command(self, profile, tests_file: str, mark_prefix: str,
+                      out: str) -> list[str]:
+        """The runner invocation for every mark-stamped test at once,
+        machine-readable results written to `out`."""
+
+    @abstractmethod
+    def read_verdict(self, out: str) -> tuple[Status, str]:
+        """One serial run's output file -> (status, observed). The verdict
+        priority (assertion > timeout > load error > never-ran) must match
+        read_batch's records as consumed by the verifier: serial and batch
+        may never diverge."""
+
+    @abstractmethod
+    def read_batch(self, out: str) -> list[BatchResult] | None:
+        """One batched run's output file -> per-test records, or None when
+        the output is missing/unreadable (-> nothing attributed, everyone
+        falls back to serial)."""
+
+    @abstractmethod
+    def classify_failure(self, fm: str) -> tuple[str, str]:
+        """One failure message -> (kind, first_line) where kind is
+        "assertion" | "timeout" | "load_error". The single shared brain for
+        serial and batched classification within this framework."""
+
+    @staticmethod
+    @abstractmethod
+    def default_tests_for(repo: str, target: str,
+                          dir_fallback: bool = True) -> str:
+        """The framework's test-file naming conventions: find the tests file
+        for a target, or return a best-guess path for a clear error."""
+
+
+# ---------------------------------------------------------------------------
+# vitest
+# ---------------------------------------------------------------------------
+
+
+class VitestHarness(Harness):
+    """The vitest spelling of the gate. Every rule in here was learned
+    against a real repo (zod, jotai, zustand, supabase/mcp) — the comments
+    carry the provenance, moved verbatim from finding_verifier."""
+
+    name = "vitest"
+    src_suffixes = (".ts", ".tsx", ".js", ".jsx", ".mjs")
+    result_file = "edgeverdict-finding-result.json"
+
+    def inject(self, pristine: str, test_code: str,
+               host_path: str | None = None) -> tuple[str | None, str]:
+        """Inject the agent's test into the pristine tests-file content (PURE).
+
+        Works on the pristine content in memory (not the file on disk) so the warm
+        base can inject a DIFFERENT test per finding, each starting from a clean file
+        — never stacking one finding's test on top of another's.
+
+        Placement is load-bearing, and it is decided by the LAST top-level opener
+        (column-0 describe/test/it), not by whether a describe exists anywhere:
+
+        * Last opener is describe -> the file ENDS in a describe block; insert
+          before its final column-0 close so the proposal inherits
+          describe-scoped helpers (learned against zod, whose tests file is one
+          wrapping describe).
+        * Last opener is test/it -> the file ends in top-level tests; the final
+          `})` closes the LAST TEST, and inserting there nests the proposal
+          inside another test's body, where `-t` skipping means it never
+          registers at runtime ("name match failed") while a typecheck project
+          still "passes" it statically. Append at end of file instead: module
+          scope is always legal and module imports/helpers are in scope.
+
+        The second case includes MIXED files — describes early, top-level its at
+        the end (jotai's store.test.tsx, found on benchmark row 6, where the old
+        "any describe anywhere" routing nested all 10 proposals inside the final
+        it). EOF-append was proven against jotai's real environment before this
+        rule was written.
+        """
+        if not test_code:
+            return None, "no test supplied"
+        code = self.strip_imports(test_code, pristine).rstrip()
+        if not code:
+            return None, "test contained only imports"
+        if host_path:
+            # catch 6b: bindings the proposal imported and the host lacks
+            # are merged into the host's import header (verified against
+            # the target's real export surface) instead of being lost to
+            # strip_imports -> ReferenceError (ufo 9 / ohash 7 class).
+            pristine = self._merge_imports(pristine, test_code, host_path)
+        openers = re.findall(r"^(describe|test|it)\b", pristine, flags=re.M)
+        if openers and openers[-1] == "describe":
+            tail = pristine.rstrip()
+            # Column-0 close, with or without a semicolon: prettier semi:false
+            # repos (zustand was the one that surfaced this) end the block with
+            # `})` not `});`. Indented closes still never match, so the top-level
+            # placement guarantee is unchanged.
+            idx = tail.rfind("\n});")
+            if idx == -1:
+                idx = tail.rfind("\n})")
+            if idx == -1:
+                return None, "could not find describe-block close to inject before"
+            return pristine[:idx] + "\n\n" + code + "\n" + pristine[idx:], ""
+        return pristine.rstrip() + "\n\n" + code + "\n", ""
+
+
+    def _import_header_end(self, pristine: str) -> int:
+        """Index of the line AFTER the last top-level import in ``pristine``."""
+        end, skipping = 0, False
+        for i, line in enumerate(pristine.splitlines()):
+            s = line.strip()
+            if skipping:
+                if s.endswith(";") or s.endswith('"') or s.endswith("'"):
+                    skipping = False
+                    end = i + 1
+                continue
+            if s.startswith("import ") or s.startswith("import{"):
+                if s.endswith(";") or (" from " in s and s[-1] in "\"';"):
+                    end = i + 1
+                else:
+                    skipping = " from " not in s
+                    if not skipping:
+                        end = i + 1
+        return end
+
+    def _merge_imports(self, pristine: str, test_code: str,
+                       host_path: str) -> str:
+        """Catch 6b. Deterministic, no model: collect the bindings the
+        proposal tried to import, keep only names the resolved module's
+        real export surface vouches for and the host does not already
+        bind, and insert one import line per specifier after the host's
+        last import. Relative specifiers resolve from the host file's
+        directory and prefer the host's own specifier for the same file;
+        bare specifiers merge only when the host already imports that
+        module verbatim (its presence is proven, its surface is not
+        cheaply checkable). Anything unverifiable is dropped — the old
+        ReferenceError is strictly better than a transform error that
+        poisons the whole file."""
+        from ..ts_surface import (_ts_exports, _ts_resolve,
+                                  bound_import_names, parse_es_imports)
+        host_dir = os.path.dirname(host_path)
+        host_imps = parse_es_imports(pristine)
+        host_names = bound_import_names(pristine)
+        host_specs = {i["spec"] for i in host_imps}
+        spec_for_file: dict[str, str] = {}
+        for i in host_imps:
+            if i["spec"].startswith("."):
+                r = _ts_resolve(host_dir, i["spec"])
+                if r:
+                    spec_for_file.setdefault(r, i["spec"])
+        lines: list[str] = []
+        for imp in parse_es_imports(test_code):
+            if imp["is_type"]:
+                continue
+            spec = imp["spec"]
+            if spec.startswith("."):
+                resolved = _ts_resolve(host_dir, spec)
+                if not resolved:
+                    continue
+                use_spec = spec_for_file.get(resolved, spec)
+                vals, _types = _ts_exports(resolved, set(), 0)
+                allowed = set(vals)
+                # defect 28: aliased imports merge as `exported as local`,
+                # verified against the EXPORTED name (the local alias never
+                # appears on the export surface by construction)
+                named = []
+                for exported, local in imp.get("pairs",
+                                               [(n, n) for n in imp["names"]]):
+                    if local in host_names or exported not in allowed:
+                        continue
+                    named.append(local if exported == local
+                                 else f"{exported} as {local}")
+                    host_names.add(local)
+                if imp["default"] and imp["default"] not in host_names                         and "default" in allowed:
+                    lines.append(f'import {imp["default"]} from "{use_spec}";')
+                    host_names.add(imp["default"])
+                if imp["namespace"] and imp["namespace"] not in host_names:
+                    lines.append(
+                        f'import * as {imp["namespace"]} from "{use_spec}";')
+                    host_names.add(imp["namespace"])
+            else:
+                if spec not in host_specs:
+                    continue
+                use_spec = spec
+                named = [n for n in imp["names"] if n not in host_names]
+            if named:
+                lines.append(
+                    f'import {{ {", ".join(named)} }} from "{use_spec}";')
+                host_names.update(n.split(" as ")[-1] for n in named)
+        if not lines:
+            return pristine
+        split = pristine.splitlines()
+        at = self._import_header_end(pristine)
+        merged = "\n".join(split[:at] + lines + split[at:])
+        # defect 29: splitlines/join eats a trailing newline; keep it
+        if pristine.endswith("\n") and not merged.endswith("\n"):
+            merged += "\n"
+        return merged
+
+    def strip_imports(self, test_code: str, pristine: str = "") -> str:
+        """Remove module-level import statements from proposed test code.
+
+        Proposals are injected INTO an existing tests file, never run standalone —
+        and ES imports are only legal at module top level, so a proposal that
+        carries its own imports fails the whole file's transform (three findings
+        died this way against zod). The harness rule already tells the proposer
+        to reuse the host file's imports; stripping enforces it mechanically.
+        Since catch 6b, stripping is half the contract: inject() first
+        merges needed-and-verified bindings into the host's import header,
+        so a stripped import is only lost when the export surface could
+        not vouch for it.
+        If a stripped import was genuinely needed, the test fails at runtime with
+        a clear ReferenceError — still a correct broken_test, instead of a
+        transform failure that poisons the batch.
+        """
+        out, skipping = [], False
+        for line in test_code.splitlines():
+            stripped = line.strip()
+            if skipping:
+                if stripped.endswith(";") or stripped.endswith('"') or stripped.endswith("'"):
+                    skipping = False
+                continue
+            if stripped.startswith("import ") or stripped.startswith("import{"):
+                # multi-line import: skip until the closing `from "..."` line
+                if not (stripped.endswith(";") or " from " in stripped and
+                        (stripped.endswith('";') or stripped.endswith("';")
+                         or stripped.endswith('"') or stripped.endswith("'"))):
+                    skipping = " from " not in stripped
+                continue
+            out.append(line)
+        return "\n".join(out)
+
+    def test_title(self, test_code: str) -> str | None:
+        m = re.search(r"""(?:test|it)\(\s*[`'"](.+?)[`'"]""", test_code or "")
+        return m.group(1) if m else None
+
+    def mark_title(self, test_code: str, mark: str) -> str | None:
+        # mark the title inside the test(...) opener itself — a naive
+        # replace can hit a lookalike (comment, string) elsewhere and
+        # leave the real test unmarked -> unattributed -> serial fallback.
+        def _stamp(m: re.Match[str]) -> str:
+            return m.group(1) + mark + " "
+
+        code, n = re.subn(
+            r"""((?:test|it)\(\s*[`'"])""",
+            _stamp,
+            test_code,
+            count=1,
+        )
+        return code if n else None
+
+    def serial_command(self, profile, tests_file: str, title: str,
+                       out: str) -> list[str]:
+        # run ONLY the injected test by name, so pre-existing suite failures
+        # can never be misattributed to this finding.
+        return profile.test_base + [
+            "-t", title, "--typecheck.enabled=false",
+            "--reporter=json", f"--outputFile={out}",
+        ]
+
+    def batch_command(self, profile, tests_file: str, mark_prefix: str,
+                      out: str) -> list[str]:
+        return profile.test_base + [
+            "-t", mark_prefix, "--typecheck.enabled=false",
+            "--reporter=json", f"--outputFile={out}",
+        ]
+
+    _EXC_HEAD = re.compile(
+        r"^([A-Za-z_$][\w$.]*(?:Error|Exception))"
+        r"(?:\s*\[[^\]]+\])?"
+        r"(?::|$)")
+
+    def classify_failure(self, fm: str) -> tuple[str, str]:
+        """One failure message -> (kind, first_line). This is the gate's
+        shared brain for serial and batched paths — they must never diverge.
+
+        Classification is by the exception actually RAISED, read from its
+        raising position: in a JS report the thrown error heads the message
+        and stack frames descend, so the first line matching a named error
+        (SomeError:, AssertionError [ERR_ASSERTION]:) is the verdict. A
+        substring match over the whole report was the pytest classifier's
+        false-positive generator, and the same latent twin sat here — a
+        crash merely QUOTING "AssertionError" (a codeframe line, a
+        .toThrow(AssertionError) expectation) could mint a confirmed gap.
+        Ordering, twice proven by the gate on itself: an identified
+        AssertionError wins outright, because its human message may
+        legitimately mention timeouts; timeout wording is consulted on the
+        raising line, or over the report only when NO error was named
+        (runner-generated reports have no traceback). vitest's assertion
+        layer (@vitest/expect, chai, node:assert) names AssertionError in
+        every genuine expect/assert failure."""
+        first = fm.strip().splitlines()[0][:200] if fm.strip() else ""
+        # vitest 3 serializes its per-test timeout through a stack-donor
+        # placeholder: the reported failureMessage is the placeholder's
+        # stack, headed "Error: STACK_TRACE_ERROR", and the human timeout
+        # message does not survive into the JSON reporter. The placeholder
+        # header IS the timeout signal; it must HEAD the message.
+        if first == "Error: STACK_TRACE_ERROR":
+            return "timeout", "test timed out (vitest 3 placeholder serialization)"
+        exc = ""
+        exc_line = ""
+        for line in fm.splitlines():
+            st = line.strip()
+            m = self._EXC_HEAD.match(st)
+            if m:
+                exc, exc_line = m.group(1), st
+                break
+        if exc.endswith("AssertionError"):
+            return "assertion", first
+        if exc.endswith("TimeoutError"):
+            return "timeout", first
+        if exc and "timed out" in exc_line.lower():
+            return "timeout", first
+        if not exc and "timed out" in fm.lower():
+            return "timeout", first
+        return "load_error", first
+
+    def read_verdict(self, out: str) -> tuple[Status, str]:
+        if not os.path.isfile(out):
+            return "broken_test", "test run produced no JSON output"
+        try:
+            data = json.loads(open(out, encoding="utf-8").read())
+        except Exception as e:  # noqa: BLE001
+            return "broken_test", f"could not parse results: {e}"
+        # find the newly-added test's result; distinguish assertion-fail from load error
+        failed_assertion = None
+        load_error = None
+        timeout_msg = None
+        ran = 0
+        for suite in data.get("testResults", []):
+            msg = suite.get("message") or ""
+            if suite.get("status") == "failed" and not suite.get("assertionResults"):
+                load_error = msg  # suite failed to collect -> broken test
+            for t in suite.get("assertionResults", []):
+                if t.get("status") in ("passed", "failed"):
+                    ran += 1
+                if t.get("status") == "failed":
+                    fm = (t.get("failureMessages") or [""])[0]
+                    kind, first = self.classify_failure(fm)
+                    if kind == "timeout":
+                        timeout_msg = first
+                    elif kind == "assertion":
+                        failed_assertion = first
+                    else:
+                        load_error = first
+        if failed_assertion:
+            return "confirmed_gap", failed_assertion
+        if timeout_msg:
+            return "timed_out", timeout_msg
+        if load_error:
+            return "broken_test", load_error
+        if ran == 0:
+            return "broken_test", "injected test did not run (name match failed)"
+        return "handled", "test passed — the tool already does this"
+
+    def read_batch(self, out: str) -> list[BatchResult] | None:
+        if not os.path.isfile(out):
+            return None
+        try:
+            with open(out, encoding="utf-8") as fh:
+                data = json.load(fh)
+        except Exception:  # noqa: BLE001
+            return None
+        results: list[BatchResult] = []
+        for suite in data.get("testResults", []):
+            for t in suite.get("assertionResults", []):
+                results.append(BatchResult(
+                    title=t.get("title") or t.get("fullName") or "",
+                    status=t.get("status") or "",
+                    failure=(t.get("failureMessages") or [""])[0],
+                ))
+        return results
+
+    @staticmethod
+    def default_tests_for(repo: str, target: str,
+                          dir_fallback: bool = True) -> str:
+        """Find the tests file for a target. Tries, in order: co-located
+        (foo.test.ts), the same basename under any tests dir, and a
+        singular/plural basename variant (errors.ts <-> error.test.ts, which is
+        exactly the shape that tripped up the first real run on zod). Returns ""
+        if nothing unambiguous is found — the caller then asks for --tests."""
+        import glob as _glob
+
+        for suffix in VitestHarness.src_suffixes:
+            if not target.endswith(suffix):
+                continue
+            stem = target[: -len(suffix)]
+            base = os.path.basename(stem)
+
+            # 1. co-located: src/foo.ts -> src/foo.test.ts (or .spec —
+            # pathe's whole suite is *.spec.ts; the old YAML picker knew
+            # the suffix and the library port forgot it, gauntlet catch 3)
+            for kind in (".test", ".spec"):
+                cand = f"{stem}{kind}{suffix}"
+                if os.path.isfile(os.path.join(repo, cand)):
+                    return cand
+            colocated = f"{stem}.test{suffix}"  # the best-GUESS for errors
+
+            # 2 & 3. search test dirs for <base>.test.<ext>, then singular/plural
+            variants = [base]
+            if base.endswith("s"):
+                variants.append(base[:-1])       # errors -> error
+            else:
+                variants.append(base + "s")      # error  -> errors
+            target_dir = os.path.dirname(os.path.join(repo, target))
+            for name in variants:
+                hits: list[str] = []
+                pats = []
+                for kind in (".test", ".spec"):
+                    pats += [
+                        f"**/tests/**/{name}{kind}{suffix}",
+                        f"**/__tests__/**/{name}{kind}{suffix}",
+                        f"**/test/**/{name}{kind}{suffix}",
+                        f"**/{name}{kind}{suffix}",
+                    ]
+                for pat in pats:
+                    hits += _glob.glob(os.path.join(repo, pat), recursive=True)
+                hits = sorted({h for h in hits if "node_modules" not in h})
+                if len(hits) == 1:
+                    return os.path.relpath(hits[0], repo)
+                if len(hits) > 1:
+                    # ambiguous — pick the file sharing the longest directory
+                    # prefix with the target (closest in the monorepo tree)
+                    def _shared(h: str) -> int:
+                        return len(os.path.commonpath([target_dir, os.path.dirname(h)]))
+                    best = max(hits, key=_shared)
+                    # only accept if it's meaningfully close (shares more than repo root)
+                    if _shared(best) > len(repo):
+                        return os.path.relpath(best, repo)
+
+            # 3.5 IMPORT MATCHING (the gauntlet's first stranger-repo lesson,
+            # unjs/ufo run 1): basename conventions cannot survive human
+            # naming — src/utils.ts is tested by test/utilities.test.ts.
+            # The pytest lane already learned this and matches by import;
+            # this is the TS spelling. PATH match first (a test importing
+            # ".../<base>" names its target outright, unjs/defu style);
+            # then NAME match (a test importing the target's exported
+            # identifiers through a barrel, unjs/ufo style). Deterministic
+            # regexes over real files — no model anywhere near resolution.
+            candidates: list[str] = []
+            cand_pats = []
+            for kind in (".test", ".spec"):
+                cand_pats += [f"**/tests/**/*{kind}{suffix}",
+                              f"**/test/**/*{kind}{suffix}",
+                              f"**/__tests__/**/*{kind}{suffix}",
+                              f"**/*{kind}{suffix}"]
+            for pat in cand_pats:
+                candidates += _glob.glob(os.path.join(repo, pat),
+                                         recursive=True)
+            candidates = sorted({c for c in candidates
+                                 if "node_modules" not in c})[:400]
+
+            def _read(p: str) -> str:
+                try:
+                    with open(p, encoding="utf-8", errors="replace") as fh:
+                        return fh.read(65536)
+                except OSError:
+                    return ""
+
+            path_re = re.compile(
+                r"""(?:from\s+|require\(\s*)['"][^'"]*/"""
+                + re.escape(base)
+                + r"""(?:\.[cm]?[jt]sx?)?['"]""")
+            path_hits = [c for c in candidates if path_re.search(_read(c))]
+            if len(path_hits) == 1:
+                return os.path.relpath(path_hits[0], repo)
+            if len(path_hits) > 1:
+                def _shared_p(h: str) -> int:
+                    return len(os.path.commonpath(
+                        [target_dir, os.path.dirname(h)]))
+                best = max(path_hits, key=_shared_p)
+                if _shared_p(best) > len(repo):
+                    return os.path.relpath(best, repo)
+
+            exported = set(re.findall(
+                r"^export\s+(?:async\s+)?(?:function|const|let|var|class|"
+                r"enum)\s+([A-Za-z_$][\w$]*)",
+                _read(os.path.join(repo, target)), re.M))
+            for grp in re.findall(r"^export\s*\{([^}]*)\}",
+                                  _read(os.path.join(repo, target)), re.M):
+                for nm in grp.split(","):
+                    nm = nm.strip().split(" as ")[-1].strip()
+                    if nm:
+                        exported.add(nm)
+            if exported:
+                scored: list[tuple[int, str]] = []
+                for c in candidates:
+                    imported: set[str] = set()
+                    for grp in re.findall(r"import\s*\{([^}]*)\}",
+                                          _read(c)):
+                        for nm in grp.split(","):
+                            nm = nm.strip().split(" as ")[0].strip()
+                            if nm:
+                                imported.add(nm)
+                    overlap = len(exported & imported)
+                    if overlap:
+                        scored.append((overlap, c))
+                if scored:
+                    scored.sort(key=lambda t: (-t[0], t[1]))
+                    top, runner_up = scored[0], (scored[1]
+                                                 if len(scored) > 1 else None)
+                    # accept only a CLEAR winner: at least two of the
+                    # target's names, and strictly more than second place —
+                    # a tie is ambiguity, and ambiguity means ask, not guess
+                    if top[0] >= 2 and (runner_up is None
+                                        or top[0] > runner_up[0]):
+                        return os.path.relpath(top[1], repo)
+
+            # 4. sole test file in the target's own directory. Covers the common
+            # one-suite-per-module-directory layout that neither co-location nor
+            # basename matching reaches (edgeverdict's own demo fixture: a
+            # directory holding order_tool.js and demo.test.js). "Exactly one"
+            # is the guard: with two or more there is nothing to infer, so we
+            # fall through to asking for --tests rather than guessing.
+            #
+            # Only for an explicitly named --target (dir_fallback=True). Files
+            # added automatically (--also, blast-radius scoping) must find a
+            # real match or be skipped: inferring at scale is how twenty
+            # unrelated files end up gated against one suite.
+            siblings: list[str] = []
+            if not dir_fallback:
+                return colocated
+            for sfx in VitestHarness.src_suffixes:
+                for pat in (f"*.test{sfx}", f"*.spec{sfx}"):
+                    siblings += _glob.glob(os.path.join(target_dir, pat))
+            siblings = sorted({s for s in siblings if "node_modules" not in s})
+            if len(siblings) == 1:
+                return os.path.relpath(siblings[0], repo)
+
+            return colocated  # fall back to the co-located name for a clear error
+        return ""
+
+
+# ---------------------------------------------------------------------------
+# selection
+# ---------------------------------------------------------------------------
+
+
+def harness_for_profile(profile) -> Harness:
+    """The harness a profile's framework calls for. RepoProfile.kind is
+    "pytest" for python repos (set by config.build_profile) and "vitest"
+    otherwise; the default keeps every existing profile — including ones
+    built by hand in tests — on the vitest path unchanged."""
+    if getattr(profile, "kind", "") == "pytest":
+        from .pytest_harness import PytestHarness
+        return PytestHarness()
+    return VitestHarness()
+
+
+def harness_for_target(target: str) -> Harness | None:
+    """The harness whose source-file conventions cover `target`, or None
+    when no framework claims the extension (the caller then asks for
+    --tests explicitly, exactly as before). Imports are local so the
+    harness registry cannot create an import cycle."""
+    from .pytest_harness import PytestHarness
+    for cls in (VitestHarness, PytestHarness):
+        if target.endswith(cls.src_suffixes):
+            return cls()
+    return None

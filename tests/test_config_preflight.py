@@ -11,7 +11,7 @@ from __future__ import annotations
 import os
 import subprocess
 
-from agentboard.config import (
+from edgeverdict.config import (
     detect_profile_kind,
     intent_from_commits,
     load_config,
@@ -39,7 +39,7 @@ def test_load_config_absent_returns_defaults(tmp_path):
 
 
 def test_load_config_reads_toml(tmp_path):
-    (tmp_path / ".agentboard.toml").write_text(
+    (tmp_path / ".edgeverdict.toml").write_text(
         'profile = "npm-vitest"\n'
         'project = "unit"\n'
         'base = "develop"\n'
@@ -129,7 +129,7 @@ def test_intent_derived_from_commit_messages(tmp_path):
 def test_autodetect_handles_zod_style_layout(tmp_path):
     """errors.ts (source) -> error.test.ts in a separate tests dir. The exact
     singular/plural + cross-dir shape that forced a manual --tests on zod."""
-    from agentboard.cli import _default_tests_for
+    from edgeverdict.cli import _default_tests_for
     repo = str(tmp_path)
     os.makedirs(f"{repo}/src/core")
     os.makedirs(f"{repo}/src/classic/tests")
@@ -140,7 +140,7 @@ def test_autodetect_handles_zod_style_layout(tmp_path):
 
 
 def test_autodetect_prefers_colocated(tmp_path):
-    from agentboard.cli import _default_tests_for
+    from edgeverdict.cli import _default_tests_for
     repo = str(tmp_path)
     os.makedirs(f"{repo}/src")
     open(f"{repo}/src/thing.ts", "w").close()
@@ -149,7 +149,7 @@ def test_autodetect_prefers_colocated(tmp_path):
 
 
 def test_autodetect_ignores_node_modules(tmp_path):
-    from agentboard.cli import _default_tests_for
+    from edgeverdict.cli import _default_tests_for
     repo = str(tmp_path)
     os.makedirs(f"{repo}/node_modules/dep/tests")
     os.makedirs(f"{repo}/src")
@@ -164,7 +164,7 @@ def test_autodetect_disambiguates_by_closest_path(tmp_path):
     """A monorepo with the SAME test filename in several packages (zod has
     error.test.ts in v3, v4/mini, and v4/classic). Must pick the one in the
     same subtree as the target, not give up and not pick a distant one."""
-    from agentboard.cli import _default_tests_for
+    from edgeverdict.cli import _default_tests_for
     repo = str(tmp_path)
     for p in (
         "packages/zod/src/v4/mini/tests/error.test.ts",
@@ -181,7 +181,7 @@ def test_autodetect_disambiguates_by_closest_path(tmp_path):
 # --- zero-config: vitest project auto-detection + init ---
 
 def test_detects_vitest_project_from_config(tmp_path):
-    from agentboard.config import detect_vitest_projects
+    from edgeverdict.config import detect_vitest_projects
     (tmp_path / "vitest.config.ts").write_text(
         'export default { test: { projects: [{ test: { name: "zod" } }] } }'
     )
@@ -189,12 +189,12 @@ def test_detects_vitest_project_from_config(tmp_path):
 
 
 def test_no_vitest_config_means_no_project(tmp_path):
-    from agentboard.config import detect_vitest_projects
+    from edgeverdict.config import detect_vitest_projects
     assert detect_vitest_projects(str(tmp_path)) == []
 
 
 def test_build_profile_auto_applies_single_project(tmp_path):
-    from agentboard.config import Config, build_profile
+    from edgeverdict.config import Config, build_profile
     (tmp_path / "pnpm-lock.yaml").write_text("")
     (tmp_path / "vitest.config.ts").write_text('name: "mypkg"')
     prof = build_profile(str(tmp_path), Config(), "x.test.ts")
@@ -204,7 +204,7 @@ def test_build_profile_auto_applies_single_project(tmp_path):
 
 def test_multiple_projects_not_auto_applied(tmp_path):
     """Ambiguity is left to the user, not guessed."""
-    from agentboard.config import Config, build_profile
+    from edgeverdict.config import Config, build_profile
     (tmp_path / "pnpm-lock.yaml").write_text("")
     (tmp_path / "vitest.config.ts").write_text('name: "a"\nname: "b"')
     prof = build_profile(str(tmp_path), Config(), "x.test.ts")

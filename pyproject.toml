@@ -3,8 +3,8 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "reviewgate"
-version = "0.6.0"
+name = "edgeverdict"
+version = "0.6.1"
 description = "A code review gate that verifies changes by executing tests, not by judging diffs. An LLM proposes edge-case tests; a deterministic harness runs each one; a behavior is a gap only if its test runs and fails."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -40,26 +40,26 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest", "ruff==0.15.22", "mypy", "build"]
-# The legacy whiteboard/loop path (agentboard.experimental) is the only code
-# that needs langgraph. The core `agentboard review` gate does not, so it is
+# The legacy whiteboard/loop path (edgeverdict.experimental) is the only code
+# that needs langgraph. The core `edgeverdict review` gate does not, so it is
 # an opt-in extra rather than a heavyweight default install.
 whiteboard = ["langgraph>=1.0"]
-# The MCP server (agentboard-mcp) — agentboard as a tool a coding agent
+# The MCP server (edgeverdict-mcp) — edgeverdict as a tool a coding agent
 # calls over stdio. Optional for the same reason as whiteboard: the core
 # CLI gate needs none of it.
 mcp = ["mcp>=1.2"]
 
 [project.urls]
-Homepage = "https://github.com/anp0429/agentboard"
-Repository = "https://github.com/anp0429/agentboard"
-Issues = "https://github.com/anp0429/agentboard/issues"
+Homepage = "https://github.com/anp0429/edgeverdict"
+Repository = "https://github.com/anp0429/edgeverdict"
+Issues = "https://github.com/anp0429/edgeverdict/issues"
 
 [project.scripts]
-agentboard = "agentboard.cli:main"
-agentboard-mcp = "agentboard.mcp_server:main"
+edgeverdict = "edgeverdict.cli:main"
+edgeverdict-mcp = "edgeverdict.mcp_server:main"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/agentboard"]
+packages = ["src/edgeverdict"]
 
 [tool.pytest.ini_options]
 pythonpath = ["src"]
@@ -67,20 +67,20 @@ pythonpath = ["src"]
 [tool.ruff.lint.per-file-ignores]
 # The legacy collaboration-loop stack is quarantined, not maintained; lint
 # noise there should never block review-path work.
-"src/agentboard/experimental/**" = ["E401", "E402", "E501", "E702", "F401"]
+"src/edgeverdict/experimental/**" = ["E401", "E402", "E501", "E702", "F401"]
 
 [tool.mypy]
 # Pragmatic scope: the review path only. No strict mode; third-party stubs
 # are not required. The experimental/ subpackage is the pre-gate
 # collaboration-loop architecture and is excluded until the roadmap picks
 # it back up.
-files = ["src/agentboard"]
+files = ["src/edgeverdict"]
 python_version = "3.11"
 ignore_missing_imports = true
-exclude = ["src/agentboard/experimental/"]
+exclude = ["src/edgeverdict/experimental/"]
 
 [[tool.mypy.overrides]]
 # exclude= stops direct collection, but mypy still follows the top-level
 # package's optional legacy imports into experimental/; silence it there too.
-module = "agentboard.experimental.*"
+module = "edgeverdict.experimental.*"
 ignore_errors = true

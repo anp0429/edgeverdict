@@ -9,7 +9,7 @@ import pytest
 # file rather than failing to import it.
 pytest.importorskip("langgraph")
 
-from agentboard import (
+from edgeverdict import (
     Node,
     Proposal,
     SchemaVerifier,

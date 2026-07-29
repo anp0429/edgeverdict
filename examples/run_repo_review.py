@@ -16,11 +16,11 @@ Usage (point REPO at a clone of the repo under review):
 """
 import sys
 
-from agentboard import build_loop, initial_board
-from agentboard.experimental.ingestion.repo_adapter import RepoIngestionAdapter
-from agentboard.experimental.verifiers.pytest_verifier import PytestVerifier
-from agentboard.experimental.whiteboards.flow_adapter import FlowWhiteboardAdapter
-from agentboard.experimental.state import CodeChange, Proposal
+from edgeverdict import build_loop, initial_board
+from edgeverdict.experimental.ingestion.repo_adapter import RepoIngestionAdapter
+from edgeverdict.experimental.verifiers.pytest_verifier import PytestVerifier
+from edgeverdict.experimental.whiteboards.flow_adapter import FlowWhiteboardAdapter
+from edgeverdict.experimental.state import CodeChange, Proposal
 
 CONST = "svg_graph_parser/world1/constants.py"
 
@@ -75,7 +75,7 @@ def main():
     app = build_loop(
         agent=RepoStubAgent(),
         verifier=PytestVerifier(repo, test_args=["-q"]),
-        whiteboard=FlowWhiteboardAdapter(path="agentboard_repo.html"),
+        whiteboard=FlowWhiteboardAdapter(path="edgeverdict_repo.html"),
         personas=PERSONAS,
         budget=3,
     )

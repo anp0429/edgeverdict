@@ -1,4 +1,4 @@
-"""End-to-end gate test, Python edition -- "agentboard can gate Python".
+"""End-to-end gate test, Python edition -- "edgeverdict can gate Python".
 
 The structural twin of tests/test_gate_e2e.py: the REAL FindingVerifier,
 driven by the REAL PytestHarness, against a real pytest project
@@ -34,12 +34,12 @@ import os
 
 import pytest
 
-from agentboard.config import Config, build_profile
-from agentboard.fingerprint import verdict_fingerprint
-from agentboard.review import ReviewFinding, ReviewRun
-from agentboard.verifiers.finding_verifier import FindingVerifier
-from agentboard.verifiers.harness import harness_for_profile
-from agentboard.verifiers.pytest_harness import PytestHarness
+from edgeverdict.config import Config, build_profile
+from edgeverdict.fingerprint import verdict_fingerprint
+from edgeverdict.review import ReviewFinding, ReviewRun
+from edgeverdict.verifiers.finding_verifier import FindingVerifier
+from edgeverdict.verifiers.harness import harness_for_profile
+from edgeverdict.verifiers.pytest_harness import PytestHarness
 
 FIXTURE = os.path.join(os.path.dirname(__file__), "fixtures", "py_target")
 

@@ -15,9 +15,9 @@ import json
 import os
 import subprocess
 
-from agentboard.review import ReviewFinding, ReviewRun
-from agentboard.verifiers.finding_verifier import FindingVerifier
-from agentboard.verifiers.vitest_verifier import RepoProfile
+from edgeverdict.review import ReviewFinding, ReviewRun
+from edgeverdict.verifiers.finding_verifier import FindingVerifier
+from edgeverdict.verifiers.vitest_verifier import RepoProfile
 
 _ASSERT_FAIL = "AssertionError: expected 1 to be 2 // Object.is equality"
 

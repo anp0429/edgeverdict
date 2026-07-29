@@ -10,7 +10,7 @@ EOF-append at module scope was proven against jotai's real environment
 before the rule was changed.
 """
 
-from agentboard.verifiers.finding_verifier import _inject
+from edgeverdict.verifiers.finding_verifier import _inject
 
 TEST = "test('probe', () => {\n  expect(1).toBe(1);\n});"
 
