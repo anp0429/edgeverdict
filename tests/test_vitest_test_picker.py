@@ -92,3 +92,55 @@ def test_probe_placement_follows_the_tests_file():
     rel3, _ = smoke_probe_for("demo.test.js")
     assert rel3 == "__edgeverdict_env_probe__.test.js"
     assert "___edgeverdict_env_probe___" in content
+
+
+def test_foreign_basename_defers_to_same_dir_test(tmp_path):
+    # EDGEVERDICT_316: three util.test.ts exist across a package, none in the
+    # target's own directory; a same-basename test in a COUSIN dir
+    # (transports/) would inject the target's ./ imports against the wrong
+    # file. When the target's own directory holds exactly one test, prefer it.
+    _mk(tmp_path, "pkg/src/tools/util.ts", "export function injectableTool(){}\n")
+    _mk(tmp_path, "pkg/src/tools/tool-schemas.test.ts",
+        "import { createToolSchemas } from './tool-schemas.js'\n")
+    _mk(tmp_path, "pkg/src/tools/tool-schemas.ts", "export const createToolSchemas=1\n")
+    _mk(tmp_path, "pkg/src/transports/util.ts", "export const x=1\n")
+    _mk(tmp_path, "pkg/src/transports/util.test.ts", "import { x } from './util.js'\n")
+    _mk(tmp_path, "pkg/src/util.ts", "export const y=1\n")
+    _mk(tmp_path, "pkg/src/util.test.ts", "import { y } from './util.js'\n")
+    got = V.default_tests_for(str(tmp_path), "pkg/src/tools/util.ts",
+                              dir_fallback=False)
+    assert got == os.path.join("pkg", "src", "tools", "tool-schemas.test.ts"), got
+
+
+def test_colocated_still_wins_over_same_dir_sibling(tmp_path):
+    # the same-dir deferral must NOT override a real co-located test
+    _mk(tmp_path, "pkg/src/tools/util.ts", "export const a=1\n")
+    _mk(tmp_path, "pkg/src/tools/util.test.ts", "import { a } from './util.js'\n")
+    _mk(tmp_path, "pkg/src/tools/other.test.ts", "import { b } from './other.js'\n")
+    got = V.default_tests_for(str(tmp_path), "pkg/src/tools/util.ts")
+    assert got == os.path.join("pkg", "src", "tools", "util.test.ts"), got
+
+
+def test_title_with_apostrophe_not_truncated():
+    # EDGEVERDICT_316_x8: a title opened with ' that CONTAINS an apostrophe was
+    # truncated at the inner quote, so -t / mark lookup missed the rendered
+    # title ("name match failed"). Extraction must read to the matching quote
+    # and unescape to the rendered form vitest reports.
+    h = V()
+    got = h.test_title(r"test('a call shouldn\'t throw', () => {})")
+    assert got == "a call shouldn't throw", got
+    # backtick and double-quote titles unaffected
+    assert h.test_title("test(`plain title`, () => {})") == "plain title"
+    assert h.test_title('it("double quoted", () => {})') == "double quoted"
+    # a double-quoted title may freely contain an apostrophe
+    assert h.test_title('''test("it shouldn't crash", () => {})''') \
+        == "it shouldn't crash"
+
+
+def test_mark_title_survives_apostrophe_title():
+    h = V()
+    code = r"test('a call shouldn\'t throw', () => {})"
+    marked = h.mark_title(code, "___evX___")
+    assert marked is not None and "___evX___" in marked
+    # the marked title still reads back with its full rendered text
+    assert h.test_title(marked) == "___evX___ a call shouldn't throw"

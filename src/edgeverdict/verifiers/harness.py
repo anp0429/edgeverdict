@@ -1,5 +1,5 @@
+# EDGEVERDICT_TESTFILE_RESOLVER_V2
 """The framework seam of the gate: everything a test framework decides.
-
 FindingVerifier owns the *gate semantics* — warm sandbox, batch-then-serial
 fallback, the four-verdict contract, and the conservative "no minted gaps"
 rule. What it must NOT own is any opinion about vitest, because the next
@@ -326,8 +326,41 @@ class VitestHarness(Harness):
         return "\n".join(out)
 
     def test_title(self, test_code: str) -> str | None:
-        m = re.search(r"""(?:test|it)\(\s*[`'"](.+?)[`'"]""", test_code or "")
-        return m.group(1) if m else None
+        # Match the OPENING quote, then read until the SAME unescaped quote —
+        # a title opened with ' must not be truncated at an apostrophe it
+        # contains (`shouldn't`), which silently cut the title short and made
+        # every -t / mark lookup miss ("name match failed", supabase/mcp#316
+        # x8). Then unescape JS string escapes so the extracted title equals
+        # the title vitest RENDERS and reports (what -t matches against).
+        m = re.search(
+            r"""(?:test|it)\(\s*(['"`])((?:\\.|(?!\1).)*)\1""",
+            test_code or "")
+        if not m:
+            return None
+        return VitestHarness._unescape_js(m.group(2))
+
+    @staticmethod
+    def _unescape_js(s: str) -> str:
+        # minimal JS string unescape: the runner reports the rendered title,
+        # so \' -> ' , \" -> " , \` -> ` , \\ -> \ . Unknown escapes keep
+        # their char (\n stays literal backslash-n only if present; titles
+        # rarely carry control escapes and vitest renders them verbatim).
+        out = []
+        i = 0
+        while i < len(s):
+            c = s[i]
+            if c == "\\" and i + 1 < len(s):
+                nxt = s[i + 1]
+                if nxt in "\"'`\\":
+                    out.append(nxt)
+                    i += 2
+                    continue
+                out.append(c)
+                i += 1
+                continue
+            out.append(c)
+            i += 1
+        return "".join(out)
 
     def mark_title(self, test_code: str, mark: str) -> str | None:
         # mark the title inside the test(...) opener itself — a naive
@@ -519,6 +552,21 @@ class VitestHarness(Harness):
                     def _shared(h: str) -> int:
                         return len(os.path.commonpath([target_dir, os.path.dirname(h)]))
                     best = max(hits, key=_shared)
+                    # but a basename match in a FOREIGN directory injects the
+                    # target's ./ imports against the wrong file (#316:
+                    # transports/util.test.ts for tools/util.ts). If the pick
+                    # is not in the target's own dir yet that dir holds exactly
+                    # one test, the same-dir suite is the safer host.
+                    if os.path.dirname(best) != target_dir:
+                        _sib = []
+                        for _sfx in VitestHarness.src_suffixes:
+                            for _k in (".test", ".spec"):
+                                _sib += _glob.glob(
+                                    os.path.join(target_dir, f"*{_k}{_sfx}"))
+                        _sib = sorted({s for s in _sib
+                                       if "node_modules" not in s})
+                        if len(_sib) == 1:
+                            return os.path.relpath(_sib[0], repo)
                     # only accept if it's meaningfully close (shares more than repo root)
                     if _shared(best) > len(repo):
                         return os.path.relpath(best, repo)
@@ -552,11 +600,28 @@ class VitestHarness(Harness):
                 except OSError:
                     return ""
 
-            path_re = re.compile(
-                r"""(?:from\s+|require\(\s*)['"][^'"]*/"""
+            # A path-import hit must RESOLVE to the target, not merely end in
+            # the target's basename: transports/util.test.ts imports its own
+            # ./util (a different file with the same basename) — counting that
+            # sent every tools/util.ts run to the wrong host (#316). Extract
+            # each import specifier ending in <base> and resolve it from the
+            # candidate's own directory; keep the candidate only if it lands
+            # on the target file.
+            from ..ts_surface import _ts_resolve as _resolve_spec
+            target_abs = os.path.normpath(os.path.join(repo, target))
+            spec_re = re.compile(
+                r"""(?:from\s+|require\(\s*)['"]([^'"]*/"""
                 + re.escape(base)
-                + r"""(?:\.[cm]?[jt]sx?)?['"]""")
-            path_hits = [c for c in candidates if path_re.search(_read(c))]
+                + r"""(?:\.[cm]?[jt]sx?)?)['"]""")
+            path_hits = []
+            for c in candidates:
+                for spec in spec_re.findall(_read(c)):
+                    if not spec.startswith("."):
+                        continue
+                    r_abs = _resolve_spec(os.path.dirname(c), spec)
+                    if r_abs and os.path.normpath(r_abs) == target_abs:
+                        path_hits.append(c)
+                        break
             if len(path_hits) == 1:
                 return os.path.relpath(path_hits[0], repo)
             if len(path_hits) > 1:

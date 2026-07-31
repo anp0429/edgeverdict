@@ -1,3 +1,4 @@
+# EDGEVERDICT_WORKSPACE_FILTER_V1
 """Config loading, profile auto-detection, and pre-flight — the difference
 between "read the source to use it" and "point it at your branch".
 
@@ -271,6 +272,49 @@ def _pnpm_from_tool_versions(scan_root: str) -> str:
     return ""
 
 
+def detect_workspace_filter(scan_root: str, tests_file: str) -> tuple[str | None, str | None]:
+    """(package_name, package_rel_dir) for the pnpm-workspace package that
+    contains tests_file — ONLY when root exec would fail: the workspace root
+    cannot resolve vitest (not in its own deps/devDeps) but the target's
+    package can. First real-world vote: supabase/mcp keeps vitest solely in
+    packages/*, so `pnpm exec vitest` at the root dies with
+    ERR_PNPM_RECURSIVE_EXEC_FIRST_FAIL. Deliberately a no-op on workspaces
+    that pass today via root exec (zod pins vitest at the root), so gauntlet
+    behavior cannot drift. Returns (None, None) whenever unsure — the
+    existing root-exec path is the fallback, and it fails loudly."""
+    import json
+    import posixpath
+
+    def _has_vitest(pkg_json_path: str) -> bool:
+        try:
+            with open(pkg_json_path, encoding="utf-8") as fh:
+                d = json.load(fh)
+        except (OSError, ValueError):
+            return False
+        deps = {**d.get("dependencies", {}), **d.get("devDependencies", {})}
+        return "vitest" in deps
+
+    if not os.path.isfile(os.path.join(scan_root, "pnpm-workspace.yaml")):
+        return None, None
+    if _has_vitest(os.path.join(scan_root, "package.json")):
+        return None, None
+    d = posixpath.dirname(tests_file)
+    while d not in ("", ".", "/"):
+        pkg_path = os.path.join(scan_root, d, "package.json")
+        if os.path.isfile(pkg_path):
+            try:
+                with open(pkg_path, encoding="utf-8") as fh:
+                    pkg = json.load(fh)
+            except (OSError, ValueError):
+                return None, None
+            name = pkg.get("name")
+            if name and _has_vitest(pkg_path):
+                return name, d
+            return None, None
+        d = posixpath.dirname(d)
+    return None, None
+
+
 def build_profile(repo_root: str, cfg: Config, tests_file: str,
                   project_dir: str = ".") -> RepoProfile:
     scan_root = os.path.normpath(os.path.join(repo_root, project_dir))
@@ -310,9 +354,12 @@ def build_profile(repo_root: str, cfg: Config, tests_file: str,
             project=project, build=cfg.build,
         )
     else:  # default to pnpm
+        ws_filter, ws_pkg_dir = (None, None)
+        if cfg.filter is None:
+            ws_filter, ws_pkg_dir = detect_workspace_filter(scan_root, tests_file)
         prof = RepoProfile.pnpm_vitest(
             os.path.basename(repo_root.rstrip("/")),
-            filter=cfg.filter, project=project, build=cfg.build,
+            filter=cfg.filter or ws_filter, project=project, build=cfg.build,
             pnpm_version=detect_pnpm_version(scan_root),
             # honor the repo's pinned dependency set when it ships one; the
             # verifier retries unfrozen (with a note) if the pin is stale
@@ -326,7 +373,15 @@ def build_profile(repo_root: str, cfg: Config, tests_file: str,
         rel, content = smoke_probe_for(tests_file)
         prof.smoke_probe = (rel, content)
         if prof.smoke_cmd:
-            prof.smoke_cmd = prof.smoke_cmd[:-1] + [rel]
+            cmd_rel = rel
+            ws_dir = locals().get("ws_pkg_dir")
+            if ws_dir:
+                # --filter execs inside the package dir, so the path handed
+                # to vitest must be package-relative; the probe FILE keeps
+                # its repo-relative path (write base is the repo root).
+                import posixpath
+                cmd_rel = posixpath.relpath(rel, ws_dir)
+            prof.smoke_cmd = prof.smoke_cmd[:-1] + [cmd_rel]
     if cfg.harness_notes:
         prof.harness_notes = cfg.harness_notes.strip()
     return prof
