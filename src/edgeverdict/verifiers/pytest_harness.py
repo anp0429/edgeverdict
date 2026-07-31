@@ -63,8 +63,14 @@ class PytestHarness(Harness):
     # ---- injection ---------------------------------------------------------
 
     def inject(self, pristine: str, test_code: str,
-               host_path: str | None = None) -> tuple[str | None, str]:
+               host_path: str | None = None,
+               target_path: str | None = None) -> tuple[str | None, str]:
         """EOF-append at module level (PURE, mirrors the vitest contract).
+
+        `target_path` is accepted for signature parity with the vitest
+        harness; free-identifier import resolution is TS-specific and is
+        not implemented for pytest yet (a Python proposal that uses an
+        unimported name still fails honestly).
         Two blank lines keep the file PEP8-shaped; nothing depends on it."""
         if not test_code:
             return None, "no test supplied"

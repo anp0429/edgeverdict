@@ -299,9 +299,14 @@ class FindingVerifier:
         host_path: str | None = None
         if self._warm_repo and self.tests_file:
             host_path = os.path.join(self._warm_repo, self.tests_file)
+        target_path: str | None = None
+        if self._warm_repo and getattr(finding, "source_file", None):
+            cand = os.path.join(self._warm_repo, finding.source_file)
+            if os.path.isfile(cand):
+                target_path = cand
         injected, err = self.harness.inject(
             self._pristine_tests or "", finding.test_code or "",
-            host_path=host_path)
+            host_path=host_path, target_path=target_path)
         if injected is None:
             finding.status = "broken_test"
             finding.observed = err
@@ -398,8 +403,13 @@ class FindingVerifier:
                 self._MARK_RE.sub("", f.test_code or ""), mark)
             if code is None:
                 continue
+            btgt: str | None = None
+            if self._warm_repo and getattr(f, "source_file", None):
+                bc = os.path.join(self._warm_repo, f.source_file)
+                if os.path.isfile(bc):
+                    btgt = bc
             injected, _err = self.harness.inject(
-                content, code, host_path=batch_host_path)
+                content, code, host_path=batch_host_path, target_path=btgt)
             if injected is None:
                 continue
             content, marked[i] = injected, mark

@@ -1,4 +1,5 @@
 # EDGEVERDICT_TESTFILE_RESOLVER_V2
+# EDGEVERDICT_FREE_IMPORTS_V1
 """The framework seam of the gate: everything a test framework decides.
 FindingVerifier owns the *gate semantics* — warm sandbox, batch-then-serial
 fallback, the four-verdict contract, and the conservative "no minted gaps"
@@ -70,7 +71,8 @@ class Harness(ABC):
 
     @abstractmethod
     def inject(self, pristine: str, test_code: str,
-               host_path: str | None = None) -> tuple[str | None, str]:
+               host_path: str | None = None,
+               target_path: str | None = None) -> tuple[str | None, str]:
         """Proposal code into the pristine tests-file content (PURE).
         Returns (new_content, "") or (None, reason)."""
 
@@ -145,7 +147,8 @@ class VitestHarness(Harness):
     result_file = "edgeverdict-finding-result.json"
 
     def inject(self, pristine: str, test_code: str,
-               host_path: str | None = None) -> tuple[str | None, str]:
+               host_path: str | None = None,
+               target_path: str | None = None) -> tuple[str | None, str]:
         """Inject the agent's test into the pristine tests-file content (PURE).
 
         Works on the pristine content in memory (not the file on disk) so the warm
@@ -183,6 +186,11 @@ class VitestHarness(Harness):
             # the target's real export surface) instead of being lost to
             # strip_imports -> ReferenceError (ufo 9 / ohash 7 class).
             pristine = self._merge_imports(pristine, test_code, host_path)
+            # names the proposal uses but never imported: bind them when the
+            # repo itself vouches for the source (target exports / sibling
+            # test imports). Otherwise leave them and fail honestly.
+            pristine = self.resolve_free_imports(
+                pristine, test_code, host_path, target_path)
         openers = re.findall(r"^(describe|test|it)\b", pristine, flags=re.M)
         if openers and openers[-1] == "describe":
             tail = pristine.rstrip()
@@ -324,6 +332,253 @@ class VitestHarness(Harness):
                 continue
             out.append(line)
         return "\n".join(out)
+
+
+    # ---- free-identifier resolution -------------------------------------
+    # An LLM proposal routinely uses identifiers it never imports (`z`,
+    # `injectableTool`), because it writes the test as if it were already
+    # inside the module. If the chosen host file does not bind those names,
+    # the injected test dies with ReferenceError before it can prove
+    # anything. That is not a finding, it is a lost verdict.
+    #
+    # Resolution is deterministic and evidence-based. A name is imported ONLY
+    # when the repo itself vouches for where it comes from:
+    #   1. the TARGET file exports it  -> import from the target
+    #   2. a sibling test in the same package imports it -> reuse that exact
+    #      specifier, verbatim
+    # Anything else is left unbound and fails honestly, exactly as today.
+    _JS_GLOBALS = frozenset("""
+        describe test it expect vi beforeEach afterEach beforeAll afterAll
+        console JSON Object Array String Number Boolean Promise Math Date
+        Map Set WeakMap WeakSet Symbol Error TypeError RangeError RegExp
+        globalThis process Buffer URL URLSearchParams AbortController
+        setTimeout clearTimeout setInterval clearInterval structuredClone
+        require module exports undefined null true false NaN Infinity
+        async await return const let var function class new typeof instanceof
+        if else for while do switch case break continue throw try catch finally
+        of in this void delete yield import export default from as
+    """.split())
+
+    _IDENT_RE = re.compile(r"(?<![\w$.])([A-Za-z_$][\w$]*)")
+    _DECL_RE = re.compile(
+        r"(?:^|[\s;{(,])(?:const|let|var|function|class)\s+([A-Za-z_$][\w$]*)")
+
+    @staticmethod
+    def _strip_js_literals(code: str) -> str:
+        """Blank out strings/templates/comments so identifier scanning does not
+        trip over words inside them."""
+        out = []
+        i, n = 0, len(code)
+        while i < n:
+            c = code[i]
+            if c in "\"'`":
+                q = c
+                i += 1
+                while i < n:
+                    if code[i] == "\\":
+                        i += 2
+                        continue
+                    if code[i] == q:
+                        i += 1
+                        break
+                    i += 1
+                out.append(" ")
+                continue
+            if c == "/" and i + 1 < n and code[i + 1] == "/":
+                while i < n and code[i] != "\n":
+                    i += 1
+                continue
+            if c == "/" and i + 1 < n and code[i + 1] == "*":
+                i += 2
+                while i + 1 < n and not (code[i] == "*" and code[i + 1] == "/"):
+                    i += 1
+                i += 2
+                continue
+            out.append(c)
+            i += 1
+        return "".join(out)
+
+    @classmethod
+    def _free_identifiers(cls, test_code: str, host: str) -> list[str]:
+        """Names the proposal uses that the host file does not bind."""
+        from ..ts_surface import bound_import_names
+        code = cls._strip_js_literals(test_code)
+        used = {m.group(1) for m in cls._IDENT_RE.finditer(code)}
+        local = {m.group(1) for m in cls._DECL_RE.finditer(code)}
+        # destructured locals: const { a, b } = ... / ({ a }) =>
+        for m in re.finditer(r"(?:const|let|var)\s*\{([^}]*)\}", code):
+            for part in m.group(1).split(","):
+                nm = part.split(":")[-1].strip()
+                if nm:
+                    local.add(nm)
+        for m in re.finditer(r"\(\s*\{([^}]*)\}\s*\)\s*=>", code):
+            for part in m.group(1).split(","):
+                nm = part.split(":")[-1].strip()
+                if nm:
+                    local.add(nm)
+        # simple arrow/function params
+        for m in re.finditer(r"\(([^)]*)\)\s*=>", code):
+            for part in m.group(1).split(","):
+                nm = part.strip().split(":")[0].strip()
+                if nm.isidentifier():
+                    local.add(nm)
+        hostb = bound_import_names(host) | {
+            m.group(1) for m in cls._DECL_RE.finditer(cls._strip_js_literals(host))}
+        keys = {m.group(1) for m in re.finditer(r"([A-Za-z_$][\w$]*)\s*:", code)}
+        free = [u for u in sorted(used)
+                if u not in cls._JS_GLOBALS and u not in local
+                and u not in hostb and u not in keys]
+        return free
+
+    @classmethod
+    def resolve_free_imports(cls, merged: str, test_code: str,
+                             host_path: str | None,
+                             target_path: str | None) -> str:
+        """Add imports for identifiers the repo can vouch for. Pure."""
+        if not host_path:
+            return merged
+        free = cls._free_identifiers(test_code, merged)
+        if not free:
+            return merged
+        from ..ts_surface import _ts_exports
+        host_dir = os.path.dirname(host_path)
+        additions: dict[str, list[str]] = {}
+
+        # 1. the target's own export surface
+        tgt_vals: set = set()
+        if target_path and os.path.isfile(target_path):
+            try:
+                tgt_vals, _ = _ts_exports(target_path, set(), 0)
+            except Exception:
+                tgt_vals = set()
+        if tgt_vals and target_path:
+            rel = os.path.relpath(target_path, host_dir).replace(os.sep, "/")
+            rel = re.sub(r"\.[cm]?tsx?$", ".js", rel)
+            if not rel.startswith("."):
+                rel = "./" + rel
+            for name in list(free):
+                if name in tgt_vals:
+                    additions.setdefault(rel, []).append(name)
+                    free.remove(name)
+
+        # 2. an existing import ELSEWHERE in the repo that binds the name,
+        # accepted only if the host's own package.json declares that
+        # dependency (so the specifier is guaranteed resolvable from here).
+        if free:
+            import json as _json
+
+            from ..ts_surface import _ts_resolve as _resolve_spec
+            from ..ts_surface import parse_es_imports as _parse_imports
+
+            # host package dir + its declared deps
+            pkg = host_dir
+            deps: set = set()
+            for _ in range(6):
+                pj = os.path.join(pkg, "package.json")
+                if os.path.isfile(pj):
+                    try:
+                        with open(pj, encoding="utf-8") as fh:
+                            d = _json.load(fh)
+                        for key in ("dependencies", "devDependencies",
+                                    "peerDependencies"):
+                            deps |= set((d.get(key) or {}).keys())
+                    except (OSError, ValueError):
+                        pass
+                    break
+                nxt = os.path.dirname(pkg)
+                if nxt == pkg:
+                    break
+                pkg = nxt
+            # search root: nearest ancestor holding a workspace/lock marker
+            root = pkg
+            for _ in range(6):
+                if any(os.path.exists(os.path.join(root, m)) for m in
+                       ("pnpm-workspace.yaml", "pnpm-lock.yaml", ".git")):
+                    break
+                nxt = os.path.dirname(root)
+                if nxt == root:
+                    break
+                root = nxt
+            # pruned walk: globbing "**" would descend node_modules and cost
+            # minutes on a real repo. Skip vendor/build dirs and cap the scan.
+            _SKIP = {"node_modules", ".git", "dist", "build", "coverage",
+                     ".next", ".turbo", "out", ".venv", "__pycache__"}
+            sibs: list[str] = []
+            for dirpath, dirnames, filenames in os.walk(root):
+                dirnames[:] = [d for d in dirnames
+                               if d not in _SKIP and not d.startswith(".")]
+                for fn in filenames:
+                    if (".test." in fn or ".spec." in fn or ".e2e." in fn) \
+                            and fn.rsplit(".", 1)[-1] in ("ts", "tsx", "js",
+                                                          "jsx", "mts", "cts"):
+                        sibs.append(os.path.join(dirpath, fn))
+                if len(sibs) > 400:
+                    break
+            seen: set = set()
+            for s in sorted({s for s in sibs if "node_modules" not in s}):
+                if not free:
+                    break
+                if s in seen:
+                    continue
+                seen.add(s)
+                try:
+                    with open(s, encoding="utf-8", errors="replace") as fh:
+                        txt = fh.read(65536)
+                except OSError:
+                    continue
+                for imp in _parse_imports(txt):
+                    spec = imp.get("spec") or ""
+                    if spec.startswith("."):
+                        # A relative specifier is meaningless verbatim (it is
+                        # relative to the SIBLING), but it is re-basable:
+                        # resolve it from the sibling's dir, confirm the module
+                        # really exports the name, then re-express the path
+                        # from the HOST's dir. Deterministic, and verified.
+                        names = [n for n, _o in (imp.get("pairs") or [])
+                                 if n in free]
+                        if not names:
+                            continue
+                        mod = _resolve_spec(os.path.dirname(s), spec)
+                        if not mod or not os.path.isfile(mod):
+                            continue
+                        try:
+                            vals, _t = _ts_exports(mod, set(), 0)
+                        except Exception:
+                            continue
+                        ok = [n for n in names if n in vals]
+                        if not ok:
+                            continue
+                        rel2 = os.path.relpath(mod, host_dir).replace(
+                            os.sep, "/")
+                        rel2 = re.sub(r"\.[cm]?tsx?$", ".js", rel2)
+                        if not rel2.startswith("."):
+                            rel2 = "./" + rel2
+                        for n in ok:
+                            additions.setdefault(rel2, []).append(n)
+                            free.remove(n)
+                        continue
+                    base = spec.split("/")[0]
+                    if base.startswith("@"):
+                        base = "/".join(spec.split("/")[:2])
+                    if deps and base not in deps:
+                        continue  # host package cannot resolve it
+                    for local_name, _orig in imp.get("pairs") or []:
+                        if local_name in free:
+                            additions.setdefault(spec, []).append(local_name)
+                            free.remove(local_name)
+        if not additions:
+            return merged
+
+        lines = []
+        for spec, names in additions.items():
+            uniq = sorted(set(names))
+            lines.append("import { " + ", ".join(uniq) + " } from \"" + spec + "\";")
+        split = merged.split("\n")
+        at = 0
+        for idx, ln in enumerate(split):
+            if ln.startswith("import ") or ln.startswith("} from"):
+                at = idx + 1
+        return "\n".join(split[:at] + lines + split[at:])
 
     def test_title(self, test_code: str) -> str | None:
         # Match the OPENING quote, then read until the SAME unescaped quote —

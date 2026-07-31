@@ -1,3 +1,4 @@
+# EDGEVERDICT_PERPAIR_PROFILE_V1
 """The library boundary for a review run — one callable, two adapters.
 
 cli.review() used to be the only entry point, so the MCP server had to fake
@@ -278,10 +279,25 @@ def run_review(request: ReviewRequest, log=print) -> ReviewResult:
     for tgt, tst_path in pairs:
         if len(pairs) > 1:
             log(f"--- reviewing {tgt} ---")
+        # PER-PAIR profile. A multi-target run can span workspace packages,
+        # and the profile carries the package-scoped runner invocation
+        # (pnpm --filter <pkg> exec vitest). Reusing the PRIMARY target's
+        # profile for a target in a DIFFERENT package runs vitest inside the
+        # wrong package: the injected test file is never collected, nothing
+        # registers, and every finding reports "name match failed" - a whole
+        # file's verdicts lost to a silent mis-scope (supabase/mcp#316, where
+        # targets 1-2 were mcp-server-supabase and target 3 was mcp-utils).
+        # The primary's profile above still drives pre-flight and reviewer
+        # harness notes; the gate gets one built for the file it will run.
+        pair_project_dir = (project_dir if tgt == target
+                            else detect_project_dir(repo, tgt))
+        pair_profile = (profile if tgt == target
+                        else build_profile(repo, cfg, tst_path,
+                                           project_dir=pair_project_dir))
         src = open(os.path.join(repo, tgt), encoding="utf-8").read()
         tst = open(os.path.join(repo, tst_path), encoding="utf-8").read()
         reviewer = ReviewerAgent(repo, tgt, tst_path, model=cfg.reviewer_model,
-                                 harness_notes=profile.harness_notes,
+                                 harness_notes=pair_profile.harness_notes,
                                  axis=req.axis, log=log)
         reviewer.base_url = provider_base
         if req.axis and req.axis != "default":
@@ -319,10 +335,10 @@ def run_review(request: ReviewRequest, log=print) -> ReviewResult:
             unreviewed.append(tgt)
             continue
         sub = ReviewRun(intent=intent, target=tgt, findings=findings)
-        verifier = FindingVerifier(repo, profile, tests_file=tst_path,
+        verifier = FindingVerifier(repo, pair_profile, tests_file=tst_path,
                                    timeout=req.timeout,
-                                   project_dir=project_dir, log=log,
-                                   harness=harness_for_profile(profile))
+                                   project_dir=pair_project_dir, log=log,
+                                   harness=harness_for_profile(pair_profile))
         verifier.run(sub)
         if not req.no_repair:
             # ONE bounded repair round: a broken proposal is the
