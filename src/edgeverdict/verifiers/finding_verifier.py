@@ -124,6 +124,7 @@ class FindingVerifier:
         project_dir: str = ".",
         log=print,
         harness: Harness | None = None,
+        execution_backend=None,
     ):
         self.repo_root = repo_root
         # print-shaped narration sink; the caller picks where lines go (the
@@ -152,7 +153,14 @@ class FindingVerifier:
         self._prep_error: str = ""
         # Repository lifecycle commands and generated tests never run
         # directly on the host unless the operator explicitly opts in.
-        self._execution_backend = backend_from_env(log=log)
+        # An explicit backend wins (the demo passes a trusted-fixture
+        # LocalBackend for its own in-package target); everything else
+        # resolves from the environment, docker by default.
+        self._execution_backend = (
+            execution_backend
+            if execution_backend is not None
+            else backend_from_env(log=log)
+        )
 
     def _workdir(self, repo: str) -> str:
         return os.path.normpath(os.path.join(repo, self.project_dir))

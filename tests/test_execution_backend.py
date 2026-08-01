@@ -233,3 +233,52 @@ def test_pnpm_install_actually_gets_a_network(monkeypatch, tmp_path):
     assert network_of(
         ["npx", "-y", "pnpm@9", "--filter", "@s/p", "exec", "vitest",
          "run"]) == "none"
+
+
+# --- demo trusted-fixture backend (sig EDGEVERDICT_DEMO_LOCAL_TESTS_V2) ---
+
+
+def test_demo_backend_is_local_without_env(monkeypatch):
+    """A stranger with no docker, no image, and no env vars gets a working
+    demo: the chooser returns a real LocalBackend despite the unsafe
+    opt-in being unset, because the demo fixture ships in this package."""
+    from edgeverdict.cli import _demo_backend
+    from edgeverdict.execution import LocalBackend
+
+    monkeypatch.delenv("EDGEVERDICT_EXECUTION_BACKEND", raising=False)
+    monkeypatch.delenv("EDGEVERDICT_ALLOW_UNSAFE_LOCAL", raising=False)
+    backend = _demo_backend()
+    assert isinstance(backend, LocalBackend)
+    # Behaviour, not shape: the backend actually executes a command.
+    # sys.executable is an absolute path, so this runs under an empty
+    # env on any machine; a bare "node" here failed on macOS, where
+    # homebrew's bin is not on the empty-env fallback PATH.
+    import sys
+
+    result = backend.run(
+        [sys.executable, "-c", "print(6*7)"], cwd=".", env={}, timeout=30
+    )
+    assert result.returncode == 0
+    assert "42" in result.stdout
+
+
+def test_demo_backend_defers_to_explicit_env(monkeypatch):
+    """An operator who explicitly chose a backend gets exactly that choice:
+    the chooser steps aside so backend_from_env rules."""
+    from edgeverdict.cli import _demo_backend
+
+    monkeypatch.setenv("EDGEVERDICT_EXECUTION_BACKEND", "docker")
+    assert _demo_backend() is None
+
+
+def test_local_backend_still_fails_closed_outside_the_demo(monkeypatch):
+    """The trusted-fixture escape must not weaken the production guard:
+    constructing LocalBackend the normal way without the opt-in still
+    refuses to run."""
+    import pytest
+
+    from edgeverdict.execution import ExecutionConfigurationError, LocalBackend
+
+    monkeypatch.delenv("EDGEVERDICT_ALLOW_UNSAFE_LOCAL", raising=False)
+    with pytest.raises(ExecutionConfigurationError):
+        LocalBackend()

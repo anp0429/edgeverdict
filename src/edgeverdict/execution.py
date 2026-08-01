@@ -294,10 +294,17 @@ def _drain(pipe, buffer: _TailBuffer) -> None:
 
 
 class LocalBackend:
-    """Legacy execution path, available only after an explicit unsafe opt-in."""
+    """Legacy execution path, available only after an explicit unsafe opt-in.
 
-    def __init__(self) -> None:
-        if not _truthy(os.environ.get("EDGEVERDICT_ALLOW_UNSAFE_LOCAL")):
+    trusted_fixture=True skips the opt-in check and exists for exactly one
+    caller: the demo, whose target ships inside this package and is trusted
+    by construction. Reviewing any external repository must never pass it.
+    """
+
+    def __init__(self, *, trusted_fixture: bool = False) -> None:
+        if not trusted_fixture and not _truthy(
+            os.environ.get("EDGEVERDICT_ALLOW_UNSAFE_LOCAL")
+        ):
             raise ExecutionConfigurationError(
                 "local execution is disabled because repository code would run as your OS user; "
                 "set EDGEVERDICT_EXECUTION_BACKEND=docker, or explicitly accept the risk with "

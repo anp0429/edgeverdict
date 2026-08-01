@@ -107,6 +107,22 @@ def _demo_profile() -> RepoProfile:
     )
 
 
+def _demo_backend():
+    """The demo's target ships inside this package, so it is trusted by
+    construction and runs with the local backend: no docker image, no
+    network policy, no opt-in env var between a stranger and the twenty
+    second demo. An operator who explicitly sets
+    EDGEVERDICT_EXECUTION_BACKEND still gets exactly what they asked for
+    (useful for verifying a sandbox setup against the demo). Reviews of
+    real repositories never come through here and keep the fail-closed
+    docker default."""
+    from .execution import LocalBackend
+
+    if os.environ.get("EDGEVERDICT_EXECUTION_BACKEND"):
+        return None  # respect the explicit choice; backend_from_env decides
+    return LocalBackend(trusted_fixture=True)
+
+
 def demo(fixed: bool = False) -> int:
     if shutil.which("node") is None or shutil.which("npm") is None:
         print("edgeverdict demo needs node + npm on PATH "
@@ -133,9 +149,18 @@ def demo(fixed: bool = False) -> int:
     t0 = time.time()
     print("[1/2] preparing sandbox (npm install, ~10s first run)...")
     run = ReviewRun(intent="demo", target="order_tool.js", findings=_findings())
-    verifier = FindingVerifier(
-        target, _demo_profile(), tests_file="demo.test.js", timeout=300
-    )
+    from .execution import ExecutionConfigurationError
+
+    try:
+        verifier = FindingVerifier(
+            target, _demo_profile(), tests_file="demo.test.js", timeout=300,
+            execution_backend=_demo_backend(),
+        )
+    except ExecutionConfigurationError as exc:
+        # Only reachable when the operator explicitly chose a backend the
+        # machine cannot satisfy; say so plainly instead of a traceback.
+        print(f"\ndemo stopped: {exc}")
+        return 1
     print("[2/2] prove attacks the change (4 proposed behaviors, "
           "every verdict decided\n      by execution — no model in the "
           "pass/fail path)...\n")

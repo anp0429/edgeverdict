@@ -3,8 +3,33 @@
 [![CI](https://github.com/anp0429/edgeverdict/actions/workflows/ci.yml/badge.svg)](https://github.com/anp0429/edgeverdict/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
+<!-- README_V8_NETFIX -->
+
 A review gate that proposes edge cases and executes them before
-judging. It does not grade diffs and does not run your existing suite:
+judging. A model proposes the tests; the verdict comes from running
+them.
+
+1. A coding agent changes a function.
+2. `edgeverdict prove` generates change-specific edge-case tests and
+   executes them against the real code, in a sandbox.
+3. One test fails. The gap is reported with the failing test itself,
+   so you can read exactly what broke and run it again.
+4. The agent fixes the code.
+5. The next run returns `HELD`.
+
+<!-- demo GIF goes here: record the keyless `edgeverdict demo` /
+     `demo --fixed` pair with vhs so the tape lives in the repo and
+     the GIF regenerates when CLI output changes -->
+
+That loop runs in about twenty seconds with no API key:
+
+```
+pip install edgeverdict
+edgeverdict demo
+edgeverdict demo --fixed
+```
+
+It does not grade diffs and does not run your existing suite:
 the edge cases come from an LLM reading your intent and your change, and
 a deterministic harness runs each proposed test against the real code in
 a clean checkout. A behavior is reported as a gap only if its test compiles, runs,
@@ -64,8 +89,14 @@ run needs `OPENAI_API_KEY` (reviewer) and, for the advisory auditor,
 Then, in any repo with uncommitted work or a feature branch:
 
 ```
-edgeverdict prove
+EDGEVERDICT_SANDBOX_NETWORK=install edgeverdict prove
 ```
+
+Generated tests and the target repo's own lifecycle scripts run in a
+hardened, network-isolated Docker sandbox by default; the env var above
+grants network access to the install step only, which most real repos
+need. Details, flags, and the explicit local opt-out are in
+[SECURITY.md](SECURITY.md).
 
 ## Usage
 
@@ -484,13 +515,15 @@ is dropped.
 
 ## Limitations
 
-- The execution trust model: reviewing a repo runs that repo's code as you.
-  The gate copies the repo to a throwaway temp dir, but the install step
-  executes the repo's dependency lifecycle scripts and the tests run with
-  your OS user, your network, and your environment (minus the two model
-  provider keys, which are scrubbed). There is no container or VM boundary
-  yet. Only review repos you would be comfortable running `npm install` in.
-  Stronger isolation is on the roadmap.
+- The execution trust model: reviewing a repo executes that repo's
+  dependency lifecycle scripts and the generated tests. By default this
+  happens inside a hardened Docker container: no network (opt-in for the
+  install step only), read-only root, non-root user, dropped
+  capabilities, and an environment filter where the secret-name deny
+  rule overrides the allowlist. Running outside the sandbox requires an
+  explicit unsafe opt-in. The boundary is a container, not a VM; treat
+  repositories you review with the same judgment you would give any
+  code you run. See [SECURITY.md](SECURITY.md).
 - Proposal coverage is a sampling process. The proposer reaches the topic
   reliably but samples which edge cases; repeated runs find overlapping but
   not identical sets.
@@ -534,6 +567,47 @@ is dropped.
 3. A second model may flag disagreement. It never votes, and conflicts
    surface for a human instead of being averaged away.
 4. Every proposal is verified against a clean tree.
-## Hardened execution backend
+## Sandboxed execution
 
-Repository lifecycle commands and generated tests use the Docker backend by default. Build `docker/Dockerfile.sandbox`, keep `EDGEVERDICT_SANDBOX_NETWORK=none`, and read `SECURITY.md` before reviewing untrusted repositories. Local execution requires an explicit unsafe opt-in.
+Repository lifecycle commands and generated tests run inside a Docker
+container by default: no network unless the install step is granted one
+(`EDGEVERDICT_SANDBOX_NETWORK=install`), read-only root filesystem,
+non-root user, dropped capabilities, and an environment filter where
+the secret-name deny rule overrides the allowlist, so a typo in the
+allowlist cannot leak a token. The isolation is verified at runtime by
+a positive-control script, not asserted by unit tests.
+
+One-time setup, since the image is never pulled automatically (Docker
+must be installed and running; on Apple Silicon, Docker Desktop may
+prompt for Rosetta):
+
+```
+docker build -f docker/Dockerfile.sandbox -t edgeverdict-sandbox:latest .
+```
+
+A different image can be named with `EDGEVERDICT_SANDBOX_IMAGE`.
+
+Day to day, three environment variables control execution:
+
+| Variable | Values | Default | Effect |
+| --- | --- | --- | --- |
+| `EDGEVERDICT_EXECUTION_BACKEND` | `docker`, `local` | `docker` | where lifecycle commands and tests run |
+| `EDGEVERDICT_SANDBOX_NETWORK` | `none`, `install`, `all` | `none` | `install` grants network to the install step only; `all` grants it to every step, so use it only with repositories you trust |
+| `EDGEVERDICT_ALLOW_UNSAFE_LOCAL` | `1` | unset | required for the local backend; without it, local execution refuses to run |
+
+The runs you will actually type:
+
+```
+# default: fully sandboxed, no network (repos whose deps are vendored or cached)
+edgeverdict prove
+
+# most real repos: sandboxed, network granted to the install step only
+EDGEVERDICT_SANDBOX_NETWORK=install edgeverdict prove
+
+# explicit escape hatch: no sandbox, runs as you (trusted repos only)
+EDGEVERDICT_EXECUTION_BACKEND=local EDGEVERDICT_ALLOW_UNSAFE_LOCAL=1 edgeverdict prove
+```
+
+Running outside the sandbox requires an explicit unsafe opt-in
+(`EDGEVERDICT_ALLOW_UNSAFE_LOCAL=1`). Flags, the env filter, and the
+full threat model are in [SECURITY.md](SECURITY.md).
