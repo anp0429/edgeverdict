@@ -39,6 +39,7 @@ import tempfile
 import time
 
 from ..review import ReviewFinding, ReviewRun
+from ..execution import backend_from_env
 from .harness import Harness, VitestHarness
 from .vitest_verifier import (RepoProfile, _proc_tail, scrubbed_env,
                               unfrozen_install)
@@ -149,18 +150,19 @@ class FindingVerifier:
         self._warm_root: str | None = None
         self._pristine_tests: str | None = None
         self._prep_error: str = ""
+        # Repository lifecycle commands and generated tests never run
+        # directly on the host unless the operator explicitly opts in.
+        self._execution_backend = backend_from_env(log=log)
 
     def _workdir(self, repo: str) -> str:
         return os.path.normpath(os.path.join(repo, self.project_dir))
 
     def _run(self, args, cwd):
-        # scrubbed_env: model-provider keys never reach executed code — the
-        # gate has no LLM in it, so nothing it spawns needs them. The warm
-        # root also hosts this run's private npm/pnpm caches (see
-        # scrubbed_env for the isolation-over-warmth tradeoff).
+        # scrubbed_env remains defense in depth. The backend applies a
+        # stricter allowlist before anything reaches untrusted code.
         env = scrubbed_env(self.profile.env, cache_root=self._warm_root)
-        return subprocess.run(
-            args, cwd=cwd, env=env, capture_output=True, text=True, timeout=self.timeout
+        return self._execution_backend.run(
+            args, cwd=cwd, env=env, timeout=self.timeout
         )
 
     def _fresh_result_path(self, repo: str) -> str:
@@ -273,7 +275,8 @@ class FindingVerifier:
         self._warm_repo = repo
 
     def close(self) -> None:
-        """Delete the warm base. Called at the end of run() unless reuse_warm."""
+        """Delete backend resources and the warm base."""
+        self._execution_backend.close()
         if self._warm_root:
             shutil.rmtree(self._warm_root, ignore_errors=True)
         self._warm_root = self._warm_repo = self._pristine_tests = None

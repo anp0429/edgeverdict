@@ -534,3 +534,6 @@ is dropped.
 3. A second model may flag disagreement. It never votes, and conflicts
    surface for a human instead of being averaged away.
 4. Every proposal is verified against a clean tree.
+## Hardened execution backend
+
+Repository lifecycle commands and generated tests use the Docker backend by default. Build `docker/Dockerfile.sandbox`, keep `EDGEVERDICT_SANDBOX_NETWORK=none`, and read `SECURITY.md` before reviewing untrusted repositories. Local execution requires an explicit unsafe opt-in.

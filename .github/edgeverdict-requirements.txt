@@ -1,0 +1,4 @@
+# Replace the placeholder hashes after building/publishing your hardened fork.
+# Generate with: pip download --no-deps edgeverdict==<version>; pip hash <wheel>
+edgeverdict==0.6.1 \
+    --hash=sha256:4e4304ecc54401c8ca7037fd01aba37020ad8362f3b722de11182ff18990b2fa

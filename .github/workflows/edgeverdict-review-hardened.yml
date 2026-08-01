@@ -1,0 +1,79 @@
+name: EdgeVerdict hardened review
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: edgeverdict-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  review:
+    if: >-
+      github.event.pull_request.draft == false &&
+      github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - name: Check out PR as untrusted data
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up trusted Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+
+      - name: Install trusted EdgeVerdict release
+        run: |
+          python -m pip install --require-hashes -r .github/edgeverdict-requirements.txt
+
+      - name: Build fixed sandbox image
+        run: |
+          docker build \
+            -f docker/Dockerfile.sandbox \
+            -t edgeverdict-sandbox:${{ github.sha }} \
+            .
+
+      - name: Run advisory review
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          EDGEVERDICT_EXECUTION_BACKEND: docker
+          EDGEVERDICT_SANDBOX_IMAGE: edgeverdict-sandbox:${{ github.sha }}
+          EDGEVERDICT_SANDBOX_NETWORK: none
+        run: |
+          edgeverdict review \
+            --repo . \
+            --head '${{ github.event.pull_request.head.sha }}' \
+            --base '${{ github.event.pull_request.base.sha }}' \
+            --json-out /tmp/edgeverdict.json
+
+      - name: Validate artifact before rendering
+        run: |
+          python - <<'PY'
+          import json, os
+          p = '/tmp/edgeverdict.json'
+          if os.path.getsize(p) > 5_000_000:
+              raise SystemExit('EdgeVerdict artifact exceeds 5 MB')
+          data = json.load(open(p, encoding='utf-8'))
+          if data.get('schema_version') != 1:
+              raise SystemExit('unexpected EdgeVerdict schema')
+          if not isinstance(data.get('findings', []), list):
+              raise SystemExit('invalid findings payload')
+          print('artifact validated')
+          PY
+
+      # Use a trusted renderer stored on the base branch or a pinned action.
+      # Do not execute a renderer from the PR checkout with write permission.
