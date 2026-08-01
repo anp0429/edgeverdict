@@ -23,8 +23,10 @@ from __future__ import annotations
 from ..providers import chat_completion
 
 import ast
+import hashlib
 import json
 import os
+import re
 
 from ..review import ReviewFinding
 from ..ts_surface import _ts_exports
@@ -99,6 +101,93 @@ Output ONLY JSON:
     "test_code": "<a complete test in the existing harness style, or null if covered>"
   }}
 ]}}"""
+
+
+# Column zero only. A `const` inside a test body is scoped to that body, and
+# listing it as available would cause the very bug this block exists to stop.
+_DECL_RE = re.compile(
+    r"^(?:export\s+)?(?:declare\s+)?(?:async\s+)?"
+    r"(?:const|let|var|function|class)\s+([A-Za-z_$][\w$]*)",
+    re.MULTILINE)
+
+
+# The static scaffolding of the user message. Keep in sync with review()
+# below: it exists so the cache key moves when the prompt's SHAPE moves, not
+# only when its inputs do.
+_USER_SHAPE = (
+    "WHAT THIS PR CHANGED|SOURCE FILE|EXISTING TESTS|IMPORT SURFACE|"
+    "IN SCOPE IN THE HOST TESTS FILE|axis"
+)
+
+
+def prompt_fingerprint() -> str:
+    """A hash of the PROMPT TEXT, so the cache invalidates when it changes.
+
+    proposal_key hashed every input the prompt reads but never the prompt
+    itself, so editing the instructions produced byte-identical keys and the
+    next run silently replayed proposals written under the old wording. A
+    prompt change you cannot observe is a prompt change you cannot evaluate.
+    Hashing the templates here means no one has to remember to bump a version
+    constant.
+    """
+    parts = [_SYSTEM, _USER_SHAPE, host_scope.__doc__ or ""]
+    h = hashlib.sha256()
+    for part in parts:
+        h.update(part.encode("utf-8"))
+        h.update(b"\x00")
+    return h.hexdigest()[:16]
+
+
+def host_scope(tests_rel: str, tests_src: str) -> str:
+    """What is ALREADY bound at module scope in the file the test lands in.
+
+    A proposal is written as if it lived in the module it is describing, but it
+    is injected into ONE specific existing tests file, and JavaScript scope is
+    per file. The diff routinely shows tests from OTHER files using helpers
+    those files define locally -- supabase/mcp defines `setup` as a plain local
+    function in server.test.ts, exports nothing, and a proposal for
+    tool-schemas.ts copied that call into tool-schemas.test.ts, where the name
+    does not exist. Three verdicts were lost to one unbound identifier.
+
+    So state the scope as data instead of hoping the model infers it.
+    """
+    if not tests_src.strip():
+        return ""
+    names: set[str] = set()
+    if tests_rel.endswith((".py",)):
+        try:
+            tree = ast.parse(tests_src)
+        except SyntaxError:
+            return ""
+        for node in tree.body:
+            if isinstance(node, ast.Import):
+                names.update((a.asname or a.name).split(".")[0] for a in node.names)
+            elif isinstance(node, ast.ImportFrom):
+                names.update(a.asname or a.name for a in node.names)
+            elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                names.add(node.name)
+            elif isinstance(node, ast.Assign):
+                for tgt in node.targets:
+                    if isinstance(tgt, ast.Name):
+                        names.add(tgt.id)
+    else:
+        from ..ts_surface import bound_import_names
+        names |= bound_import_names(tests_src)
+        names |= {m.group(1) for m in _DECL_RE.finditer(tests_src)}
+    if not names:
+        return ""
+    listed = ", ".join(sorted(names))
+    return (
+        f"IN SCOPE IN THE HOST TESTS FILE ({tests_rel}) — your test is injected "
+        f"into THIS file, so only these names are already available:\n"
+        f"  {listed}\n"
+        f"Any other name you use MUST be imported by your test, with a path "
+        f"correct relative to {os.path.dirname(tests_rel) or '.'}. "
+        f"Helpers you see in the diff or in other test files are NOT in scope "
+        f"here unless that module exports them; a locally-defined helper in "
+        f"another file cannot be imported at all. An unbound name makes the "
+        f"test unrunnable and the finding is discarded."
+    )
 
 
 def _ts_import_surface(repo_root: str, target_rel: str) -> str:
@@ -481,6 +570,7 @@ class ReviewerAgent:
         source = self._read(self.target_path)[: self.max_chars]
         tests = self._read(self.existing_tests_path)[: self.max_chars]
         surface = import_surface(self.repo_root, self.target_path)
+        scope = host_scope(self.existing_tests_path, tests)
         change_block = (
             f"WHAT THIS PR CHANGED (review THIS against the intent, not the whole file):\n"
             f"```\n{change}\n```\n\n"
@@ -492,6 +582,7 @@ class ReviewerAgent:
             f"SOURCE FILE ({self.target_path}):\n```\n{source}\n```\n\n"
             f"EXISTING TESTS ({self.existing_tests_path}):\n```\n{tests}\n```"
             + (f"\n\n{surface}" if surface else "")
+            + (f"\n\n{scope}" if scope else "")
             + (f"\n\n{self._axis_directive}" if self._axis_directive else "")
         )
         notes = (

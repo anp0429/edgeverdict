@@ -58,10 +58,20 @@ def proposal_key(
     run_critic: bool,
     axis: str = "default",
 ) -> str:
-    """sha256 over every input either prompt reads. Order fixed, versioned."""
+    """sha256 over every input either prompt reads, AND over the prompt text.
+
+    Hashing only the inputs meant an edit to the instructions produced an
+    identical key, so the next run replayed proposals written under the old
+    wording and the change looked like it had no effect. The prompt is an
+    input; it is now hashed like one, and no one has to remember to bump
+    _CACHE_VERSION by hand.
+    """
+    from .agents.reviewer_agent import prompt_fingerprint
+
     h = hashlib.sha256()
     for part in (
         _CACHE_VERSION,
+        prompt_fingerprint(),
         intent,
         change,
         source,
