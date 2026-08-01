@@ -88,32 +88,23 @@ def test_bare_specifier_rejected_when_dep_not_declared(tmp_path):
     assert "zod/v4" not in merged  # unresolvable here -> fail honestly
 
 
-def test_relative_specifier_is_rebased_and_export_verified(tmp_path):
+def test_relative_specifier_is_never_rebased(tmp_path):
+    """Generic names collide across suites; a verified export is not the same
+    thing. supabase/mcp has a local `setup` in server.test.ts AND an exported
+    `setup` in test/e2e/utils.ts with a different signature; binding by name
+    ran a proposal against the wrong server and minted three false gaps.
+    Unbound fails honestly as broken_test, which is the correct outcome."""
     root = _pkg(tmp_path)
     _w(root, "packages/app/test/mocks.ts",
-       "export async function createOrganization() { return { id: 1 }; }\n")
+       "export async function setup() { return { client: 1 }; }\n")
     _w(root, "packages/app/test/e2e/projects.e2e.ts",
-       "import { createOrganization } from '../mocks.js';\ntest('a', () => {});\n")
+       "import { setup } from '../mocks.js';\ntest('a', () => {});\n")
     host = _w(root, "packages/app/src/tools/schemas.test.ts",
               "import { describe, expect, test } from 'vitest';\n")
-    code = "test('x', async () => { await createOrganization(); });"
+    code = "test('x', async () => { await setup({ readOnly: true }); });"
     merged = V.resolve_free_imports(open(host).read(), code, host, None)
-    assert "createOrganization" in merged
-    # re-expressed relative to the HOST, not copied verbatim from the sibling
-    assert "../../test/mocks.js" in merged
-    assert "'../mocks.js'" not in merged
-
-
-def test_relative_specifier_rejected_when_module_lacks_the_export(tmp_path):
-    root = _pkg(tmp_path)
-    _w(root, "packages/app/test/mocks.ts", "export const somethingElse = 1;\n")
-    _w(root, "packages/app/test/e2e/projects.e2e.ts",
-       "import { createOrganization } from '../mocks.js';\ntest('a', () => {});\n")
-    host = _w(root, "packages/app/src/tools/schemas.test.ts",
-              "import { describe, expect, test } from 'vitest';\n")
-    code = "test('x', async () => { await createOrganization(); });"
-    merged = V.resolve_free_imports(open(host).read(), code, host, None)
-    assert "mocks.js" not in merged  # surface says no -> do not invent
+    assert "mocks.js" not in merged
+    assert "setup" not in merged.split("test(")[0]
 
 
 def test_noop_when_nothing_is_free(tmp_path):

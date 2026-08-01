@@ -467,7 +467,6 @@ class VitestHarness(Harness):
         if free:
             import json as _json
 
-            from ..ts_surface import _ts_resolve as _resolve_spec
             from ..ts_surface import parse_es_imports as _parse_imports
 
             # host package dir + its declared deps
@@ -529,33 +528,21 @@ class VitestHarness(Harness):
                 for imp in _parse_imports(txt):
                     spec = imp.get("spec") or ""
                     if spec.startswith("."):
-                        # A relative specifier is meaningless verbatim (it is
-                        # relative to the SIBLING), but it is re-basable:
-                        # resolve it from the sibling's dir, confirm the module
-                        # really exports the name, then re-express the path
-                        # from the HOST's dir. Deterministic, and verified.
-                        names = [n for n, _o in (imp.get("pairs") or [])
-                                 if n in free]
-                        if not names:
-                            continue
-                        mod = _resolve_spec(os.path.dirname(s), spec)
-                        if not mod or not os.path.isfile(mod):
-                            continue
-                        try:
-                            vals, _t = _ts_exports(mod, set(), 0)
-                        except Exception:
-                            continue
-                        ok = [n for n in names if n in vals]
-                        if not ok:
-                            continue
-                        rel2 = os.path.relpath(mod, host_dir).replace(
-                            os.sep, "/")
-                        rel2 = re.sub(r"\.[cm]?tsx?$", ".js", rel2)
-                        if not rel2.startswith("."):
-                            rel2 = "./" + rel2
-                        for n in ok:
-                            additions.setdefault(rel2, []).append(n)
-                            free.remove(n)
+                        # A relative specifier is NOT re-based. It was, and it
+                        # minted false gaps: `setup` in supabase/mcp is a local
+                        # helper in server.test.ts AND an exported helper in
+                        # test/e2e/utils.ts with a DIFFERENT signature. Binding
+                        # by name resolved a proposal's setup({readOnly,
+                        # features}) to the e2e one, which ignores both, so the
+                        # test ran against a default server and failed on a
+                        # count it was never given a chance to satisfy. Three
+                        # "confirmed gaps" out of one wrong import.
+                        # Verifying that a module EXPORTS the name does not
+                        # verify it is the SAME thing; generic names (setup,
+                        # render, createClient) collide across suites. An
+                        # unbound name fails honestly as broken_test, which is
+                        # the correct outcome. Bare specifiers (below) are safe
+                        # because the package manifest vouches for them.
                         continue
                     base = spec.split("/")[0]
                     if base.startswith("@"):
