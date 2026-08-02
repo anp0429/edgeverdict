@@ -107,6 +107,39 @@ def _demo_profile() -> RepoProfile:
     )
 
 
+def sandbox_build(python_version: str | None = None,
+                  tag: str | None = None) -> int:
+    """Build the sandbox image from the Dockerfile shipped in this package.
+
+    pip users have no repo checkout, so the fail-closed default backend
+    must be buildable from the package alone. The packaged Dockerfile is
+    kept byte-identical to docker/Dockerfile.sandbox by a suite test."""
+    import shutil
+    import subprocess
+    import tempfile
+    from importlib import resources
+
+    if shutil.which("docker") is None:
+        print("sandbox-build: docker is not installed or not on PATH")
+        return 1
+    image = tag or os.environ.get(
+        "EDGEVERDICT_SANDBOX_IMAGE", "edgeverdict-sandbox:latest")
+    df = resources.files("edgeverdict._sandbox").joinpath("Dockerfile")
+    with tempfile.TemporaryDirectory(prefix="edgeverdict-sandbox-") as ctx:
+        dst = os.path.join(ctx, "Dockerfile")
+        with open(dst, "wb") as fh:
+            fh.write(df.read_bytes())
+        cmd = ["docker", "build", "-f", dst, "-t", image]
+        if python_version:
+            cmd += ["--build-arg", f"PYTHON_VERSION={python_version}"]
+        cmd.append(ctx)
+        print("sandbox-build: " + " ".join(cmd))
+        proc = subprocess.run(cmd)
+    if proc.returncode == 0:
+        print(f"sandbox-build: built {image}")
+    return proc.returncode
+
+
 def _demo_backend():
     """The demo's target ships inside this package, so it is trusted by
     construction and runs with the local backend: no docker image, no
@@ -358,6 +391,16 @@ def main(argv: list[str] | None = None) -> int:
     d.add_argument("--fixed", action="store_true",
                    help="run against the fixed target (red -> green)")
 
+    sb = sub.add_parser("sandbox-build",
+                        help="build the hardened sandbox image from the "
+                             "Dockerfile shipped inside this package")
+    sb.add_argument("--python", default=None, metavar="VERSION",
+                    help="base python for the image (e.g. 3.13.13 for repos "
+                         "that pin requires-python); default is the image's "
+                         "own default")
+    sb.add_argument("--tag", default=None,
+                    help="image tag (default: EDGEVERDICT_SANDBOX_IMAGE or "
+                         "edgeverdict-sandbox:latest)")
     i = sub.add_parser("init", help="write a starter .edgeverdict.toml for this repo")
     i.add_argument("--repo", default=".", help="path to the repo (default: cwd)")
     i.add_argument("--force", action="store_true", help="overwrite existing config")
@@ -437,6 +480,8 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     if args.command == "demo":
         return demo(fixed=args.fixed)
+    if args.command == "sandbox-build":
+        return sandbox_build(python_version=args.python, tag=args.tag)
     if args.command == "init":
         return init(args)
     if args.command == "review":

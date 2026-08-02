@@ -672,3 +672,63 @@ def test_free_imports_bind_from_target_module(tmp_path):
         pristine, code, host_path=host,
         target_path=str(pkg / "core.py"))
     assert "from pkgapi.core import dumps" in injected
+
+
+# --- packaged sandbox dockerfile (sig EDGEVERDICT_SANDBOX_BUILD_TESTS_V1) ---
+
+
+def test_packaged_dockerfile_matches_repo_copy():
+    """The wheel ships the Dockerfile so pip users can build the image;
+    this pin stops the packaged copy drifting from docker/Dockerfile.sandbox."""
+    import os
+    from importlib import resources
+
+    packaged = resources.files("edgeverdict._sandbox").joinpath(
+        "Dockerfile").read_bytes()
+    repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    repo_copy = open(os.path.join(repo_root, "docker", "Dockerfile.sandbox"),
+                     "rb").read()
+    assert packaged == repo_copy
+
+
+def test_sandbox_build_constructs_docker_command(monkeypatch, capsys):
+    """sandbox-build materializes the packaged Dockerfile and runs docker
+    build with the right tag and optional PYTHON_VERSION build arg."""
+    import subprocess
+
+    from edgeverdict.cli import sandbox_build
+
+    seen = {}
+
+    class P:
+        returncode = 0
+
+    def fake_run(cmd, **kw):
+        seen["cmd"] = cmd
+        return P()
+
+    monkeypatch.setattr("shutil.which", lambda _: "/usr/bin/docker")
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.delenv("EDGEVERDICT_SANDBOX_IMAGE", raising=False)
+    rc = sandbox_build(python_version="3.13.13")
+    assert rc == 0
+    cmd = seen["cmd"]
+    assert cmd[:2] == ["docker", "build"]
+    assert "edgeverdict-sandbox:latest" in cmd
+    assert "PYTHON_VERSION=3.13.13" in " ".join(cmd)
+    df = cmd[cmd.index("-f") + 1]
+    import os
+    assert os.path.basename(df) == "Dockerfile"
+
+
+def test_fail_closed_error_names_sandbox_build(monkeypatch):
+    """The pip-user dead end: the docker-required error must name a
+    command that works without a repo checkout."""
+    import pytest as _pytest
+
+    from edgeverdict.execution import DockerBackend, ExecutionConfigurationError
+
+    monkeypatch.setattr("edgeverdict.execution.shutil.which", lambda _: None)
+    with _pytest.raises(ExecutionConfigurationError) as e:
+        DockerBackend(log=lambda *a, **k: None)
+    assert "sandbox-build" in str(e.value)

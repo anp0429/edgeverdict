@@ -391,7 +391,7 @@ class DockerBackend:
         resolved = shutil.which(docker)
         if not resolved:
             raise ExecutionConfigurationError(
-                "Docker is required for the default hardened backend. Build the image with "
+                "Docker is required for the default hardened backend. Run `edgeverdict sandbox-build` (the Dockerfile ships inside the package), or from a repo checkout: "
                 "`docker build -f docker/Dockerfile.sandbox -t edgeverdict-sandbox:latest .`"
             )
         self.docker = resolved
