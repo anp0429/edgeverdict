@@ -15,6 +15,7 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 import threading
 import uuid
 from collections import deque
@@ -170,6 +171,34 @@ def _rewrite_mounted_paths(env: Mapping[str, str], mount_root: Path) -> dict[str
         else:
             rewritten[name] = value
     return rewritten
+
+
+def _map_host_interpreter(args: Sequence[str]) -> list[str]:
+    """Map the host Python interpreter to the container's.
+
+    Python profiles build commands with sys.executable, an absolute path
+    into the operator's venv. That path lies outside the mount root, so
+    path rewriting correctly leaves it alone -- and the container would
+    exec an interpreter that does not exist inside it. The sandbox image
+    ships `python` on PATH; substitute it for argv[0] only, and only when
+    argv[0] is this process's interpreter (compared raw and resolved, for
+    venv symlinks). Every other argv[0] -- npm, npx, node -- passes through
+    untouched.
+    """
+    out = list(args)
+    if not out:
+        return out
+    head = out[0]
+    try:
+        same = head == sys.executable or (
+            os.path.isabs(head)
+            and Path(head).resolve() == Path(sys.executable).resolve()
+        )
+    except OSError:
+        same = head == sys.executable
+    if same:
+        out[0] = "python"
+    return out
 
 
 def _rewrite_arg_paths(args: Sequence[str], mount_root: Path) -> list[str]:
@@ -439,10 +468,16 @@ class DockerBackend:
             "--workdir",
             container_cwd,
         ]
+        # Python user-site inside the mount: the only writable+executable
+        # surface in the container. Every command gets it so the install
+        # and the test runs resolve the same site; harmless for JS lanes.
+        safe_env.setdefault(
+            "PYTHONUSERBASE", "/edgeverdict/.edgeverdict-pyuser"
+        )
         for key in sorted(safe_env):
             command.extend(["--env", f"{key}={safe_env[key]}"])
         command.append(self.image)
-        command.extend(_rewrite_arg_paths(args, mount_root))
+        command.extend(_rewrite_arg_paths(_map_host_interpreter(args), mount_root))
         return command
 
     def run(self, args, *, cwd, env, timeout):

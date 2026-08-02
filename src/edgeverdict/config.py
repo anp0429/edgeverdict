@@ -182,6 +182,24 @@ def detect_project_dir(repo_root: str, target: str) -> str:
     """
     root = os.path.abspath(repo_root)
     d = os.path.dirname(os.path.abspath(os.path.join(root, target)))
+    if target.endswith(".py"):
+        # Python monorepos install per-package at the nearest pyproject
+        # (setup.cfg/setup.py for older layouts). A JS lockfile at the
+        # monorepo root must NOT win for a Python target -- mixed repos
+        # like deepagents carry both toolchains.
+        walk = d
+        while True:
+            for marker in ("pyproject.toml", "setup.cfg", "setup.py"):
+                if os.path.isfile(os.path.join(walk, marker)):
+                    rel = os.path.relpath(walk, root)
+                    return "." if rel == os.curdir else rel
+            if os.path.normpath(walk) == os.path.normpath(root) or len(walk) <= len(root):
+                break
+            parent = os.path.dirname(walk)
+            if parent == walk:
+                break
+            walk = parent
+        return "."
     chain: list[str] = []
     while True:
         chain.append(d)
@@ -315,23 +333,96 @@ def detect_workspace_filter(scan_root: str, tests_file: str) -> tuple[str | None
     return None, None
 
 
+def _docker_backend_selected() -> bool:
+    """Mirror backend_from_env's choice without constructing a backend.
+
+    Constructing DockerBackend probes the daemon and raises when absent;
+    the profile only needs to know which way the environment points. The
+    default here must stay in lockstep with execution.backend_from_env:
+    docker unless EDGEVERDICT_EXECUTION_BACKEND says local.
+    """
+    return os.environ.get("EDGEVERDICT_EXECUTION_BACKEND", "docker").strip().lower() != "local"
+
+
+def _python_sandbox_install(scan_root: str) -> list[str]:
+    """Editable-install command for the sandboxed python lane.
+
+    Installs the project at the detected project dir, adding a declared
+    test extra when pyproject names one (test > tests > dev). The command
+    says `python`, which is the container's interpreter; this command is
+    only emitted when the docker backend is selected.
+    """
+    spec = "."
+    group_reqs: list[str] = []
+    pyproject = os.path.join(scan_root, "pyproject.toml")
+    if os.path.isfile(pyproject):
+        try:
+            import tomllib
+            with open(pyproject, "rb") as fh:
+                data = tomllib.load(fh)
+            extras = data.get("project", {}).get("optional-dependencies", {})
+            for name in ("test", "tests", "dev"):
+                if name in extras:
+                    spec = f".[{name}]"
+                    break
+            else:
+                # PEP 735 dependency-groups (deepagents-style). pip's
+                # --group flag is too new to assume in the image, so pass
+                # the group's packages as explicit requirements instead.
+                # Entries are strings or {include-group = "..."} dicts;
+                # resolve includes one level of nesting at a time.
+                groups = data.get("dependency-groups", {})
+
+                def _resolve(name: str, seen: frozenset[str]) -> list[str]:
+                    if name in seen:
+                        return []
+                    out: list[str] = []
+                    for entry in groups.get(name, []):
+                        if isinstance(entry, str):
+                            out.append(entry)
+                        elif isinstance(entry, dict) and "include-group" in entry:
+                            out.extend(_resolve(entry["include-group"],
+                                                seen | {name}))
+                    return out
+
+                for name in ("test", "tests", "dev"):
+                    if name in groups:
+                        group_reqs = _resolve(name, frozenset())
+                        break
+        except Exception:
+            spec, group_reqs = ".", []
+    # --user: the container root filesystem is read-only under a non-root
+    # user, so site-packages is unwritable; the DockerBackend points
+    # PYTHONUSERBASE inside the bind-mounted warm copy, the one surface
+    # that is both writable and executable (noexec /tmp would break
+    # compiled wheels). --no-cache-dir: there is no writable home for a
+    # pip cache. Harmless under any backend; only emitted for docker.
+    return ["python", "-m", "pip", "install", "--quiet", "--user",
+            "--no-cache-dir", "-e", spec, *group_reqs]
+
+
 def build_profile(repo_root: str, cfg: Config, tests_file: str,
                   project_dir: str = ".") -> RepoProfile:
     scan_root = os.path.normpath(os.path.join(repo_root, project_dir))
     kind = cfg.profile_kind or detect_profile_kind(scan_root)
     if kind == "pytest":
-        # Python profile. No install step by default: the gate runs in the
-        # environment the user already provisioned (the same interpreter
-        # running edgeverdict), because "pip install a repo's deps into a
-        # per-run venv" is a policy decision with real blast radius —
-        # deliberately out of scope until someone needs it. No build step
-        # either. Smoke = collect the tests file: proves pytest starts, the
+        # Python profile. Under the LOCAL backend there is no install step:
+        # the gate runs in the environment the operator already provisioned,
+        # because "pip install a repo's deps into the operator's env" has
+        # real blast radius. The docker sandbox dissolves exactly that
+        # objection -- an install inside the container touches a filesystem
+        # that evaporates with the run -- so when the docker backend is
+        # selected the profile installs the project (with its test extra
+        # when one is declared) into the container. The DockerBackend maps
+        # sys.executable to the container's `python`. No build step either
+        # way. Smoke = collect the tests file: proves pytest starts, the
         # file parses, and its imports resolve before any finding is judged.
         import sys
         test_base = [sys.executable, "-m", "pytest"]
         prof = RepoProfile(
             name=os.path.basename(repo_root.rstrip("/")),
-            install_cmd=[],
+            install_cmd=(_python_sandbox_install(scan_root)
+                         if _docker_backend_selected() else []),
             test_base=test_base,
             build_cmd=None,
             env={"CI": "true"},

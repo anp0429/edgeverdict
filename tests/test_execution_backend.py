@@ -282,3 +282,130 @@ def test_local_backend_still_fails_closed_outside_the_demo(monkeypatch):
     monkeypatch.delenv("EDGEVERDICT_ALLOW_UNSAFE_LOCAL", raising=False)
     with pytest.raises(ExecutionConfigurationError):
         LocalBackend()
+
+
+# --- python lane under docker (sig EDGEVERDICT_PYLANE_DOCKER_TESTS_V1) ---
+
+
+def _docker_backend_for_test(monkeypatch):
+    monkeypatch.setattr(
+        "edgeverdict.execution.shutil.which", lambda _: "/usr/bin/docker"
+    )
+
+    class Probe:
+        returncode = 0
+
+    monkeypatch.setattr(
+        "edgeverdict.execution.subprocess.run", lambda *a, **k: Probe()
+    )
+    return DockerBackend(
+        image="edgeverdict-sandbox:test",
+        limits=DockerLimits(max_output_bytes=4096),
+        log=lambda *a, **k: None,
+    )
+
+
+def test_host_interpreter_maps_to_container_python(monkeypatch, tmp_path):
+    """The pytest profile's sys.executable is a host venv path outside the
+    mount root; the built docker command must run the container's python
+    instead, or the lane dies at exec."""
+    import sys
+
+    backend = _docker_backend_for_test(monkeypatch)
+    root = tmp_path / "edgeverdict_warm_test"
+    cwd = root / "repo"
+    cwd.mkdir(parents=True)
+    command = backend._docker_command(
+        [sys.executable, "-m", "pytest", "--collect-only"],
+        cwd=str(cwd), env={"CI": "true"}, name="ev-test",
+    )
+    image_at = command.index("edgeverdict-sandbox:test")
+    argv = command[image_at + 1:]
+    assert argv[0] == "python"
+    # The user-site env rides along on the mount, where writes and
+    # native-extension loading both work.
+    assert "--env" in command
+    assert "PYTHONUSERBASE=/edgeverdict/.edgeverdict-pyuser" in command
+    assert sys.executable not in command
+    assert argv[1:3] == ["-m", "pytest"]
+
+
+def test_non_interpreter_argv_passes_through(monkeypatch, tmp_path):
+    """npm stays npm: the mapping fires only on this process's interpreter."""
+    backend = _docker_backend_for_test(monkeypatch)
+    root = tmp_path / "edgeverdict_warm_test"
+    cwd = root / "repo"
+    cwd.mkdir(parents=True)
+    command = backend._docker_command(
+        ["npm", "install", "--no-audit"],
+        cwd=str(cwd), env={}, name="ev-test",
+    )
+    image_at = command.index("edgeverdict-sandbox:test")
+    assert command[image_at + 1] == "npm"
+
+
+def test_pytest_profile_installs_under_docker(monkeypatch, tmp_path):
+    """Docker selected -> the profile installs the project with its declared
+    test extra; local selected -> no install, exactly the old behavior."""
+    from edgeverdict.config import Config, build_profile
+
+    (tmp_path / "pyproject.toml").write_text(
+        "[project]\nname = \"fixture\"\nversion = \"0\"\n"
+        "[project.optional-dependencies]\ntest = [\"pytest\"]\n"
+    )
+    (tmp_path / "test_x.py").write_text("def test_ok():\n    assert True\n")
+
+    monkeypatch.setenv("EDGEVERDICT_EXECUTION_BACKEND", "docker")
+    prof = build_profile(str(tmp_path), Config(), "test_x.py")
+    assert prof.install_cmd == [
+        "python", "-m", "pip", "install", "--quiet", "--user",
+        "--no-cache-dir", "-e", ".[test]"
+    ]
+
+    monkeypatch.setenv("EDGEVERDICT_EXECUTION_BACKEND", "local")
+    prof_local = build_profile(str(tmp_path), Config(), "test_x.py")
+    assert prof_local.install_cmd == []
+
+
+def test_python_target_project_dir_prefers_pyproject(tmp_path):
+    """A python target in a mixed monorepo resolves to its own package dir
+    even when a JS lockfile sits at the root."""
+    import os
+
+    from edgeverdict.config import detect_project_dir
+
+    (tmp_path / "pnpm-lock.yaml").write_text("")
+    pkg = tmp_path / "libs" / "sdk" / "src"
+    pkg.mkdir(parents=True)
+    (tmp_path / "libs" / "sdk" / "pyproject.toml").write_text(
+        "[project]\nname = \"sdk\"\nversion = \"0\"\n"
+    )
+    (pkg / "mod.py").write_text("x = 1\n")
+    assert detect_project_dir(str(tmp_path), "libs/sdk/src/mod.py") == os.path.join(
+        "libs", "sdk"
+    )
+    # JS target in the same repo keeps lockfile-at-root semantics.
+    js = tmp_path / "web"
+    js.mkdir()
+    (js / "index.ts").write_text("export {}\n")
+    assert detect_project_dir(str(tmp_path), "web/index.ts") == "."
+
+
+def test_pytest_profile_reads_dependency_groups(monkeypatch, tmp_path):
+    """A PEP 735 [dependency-groups] test table (deepagents-style) lands in
+    the install command as explicit requirements, includes resolved."""
+    from edgeverdict.config import Config, build_profile
+
+    (tmp_path / "pyproject.toml").write_text(
+        "[project]\nname = \"fixture\"\nversion = \"0\"\n"
+        "[dependency-groups]\n"
+        "lint = [\"ruff\"]\n"
+        "test = [\"pytest-socket\", {include-group = \"lint\"}]\n"
+    )
+    (tmp_path / "test_x.py").write_text("def test_ok():\n    assert True\n")
+    monkeypatch.setenv("EDGEVERDICT_EXECUTION_BACKEND", "docker")
+    prof = build_profile(str(tmp_path), Config(), "test_x.py")
+    assert prof.install_cmd == [
+        "python", "-m", "pip", "install", "--quiet", "--user",
+        "--no-cache-dir", "-e", ".", "pytest-socket", "ruff",
+    ]
