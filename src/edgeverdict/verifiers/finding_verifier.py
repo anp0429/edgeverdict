@@ -142,6 +142,22 @@ class FindingVerifier:
         self.tests_file = (
             tests_file  # where agent tests get injected (helpers in scope)
         )
+        # Command-time tests path. The pytest harness passes the path
+        # straight to pytest, which resolves it against cwd = project_dir;
+        # a repo-relative path doubles the prefix in monorepos
+        # (libs/pkg/libs/pkg/...). The vitest harness does its own
+        # workspace translation and keeps the repo-relative form.
+        # Injection always writes at the repo-relative path either way —
+        # only the COMMAND path is translated.
+        self._cmd_tests_file = self.tests_file
+        if project_dir not in (".", "", None) and getattr(
+            self.harness, "project_relative_cmd_paths", False
+        ):
+            import posixpath
+            self._cmd_tests_file = posixpath.relpath(
+                self.tests_file.replace(os.sep, "/"),
+                project_dir.replace(os.sep, "/"),
+            )
         self.timeout = timeout
         self.reuse_warm = (
             reuse_warm  # keep the warm base across run() calls (for N runs)
@@ -332,7 +348,7 @@ class FindingVerifier:
             out = self._fresh_result_path(repo)
             try:
                 self._run(
-                    self.harness.serial_command(self.profile, self.tests_file,
+                    self.harness.serial_command(self.profile, self._cmd_tests_file,
                                                 title, out),
                     self._workdir(repo),
                 )
@@ -436,7 +452,7 @@ class FindingVerifier:
             out = self._fresh_result_path(repo)
             try:
                 self._run(
-                    self.harness.batch_command(self.profile, self.tests_file,
+                    self.harness.batch_command(self.profile, self._cmd_tests_file,
                                                self._MARK_PREFIX, out),
                     self._workdir(repo),
                 )

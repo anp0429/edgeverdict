@@ -65,19 +65,278 @@ class PytestHarness(Harness):
     def inject(self, pristine: str, test_code: str,
                host_path: str | None = None,
                target_path: str | None = None) -> tuple[str | None, str]:
-        """EOF-append at module level (PURE, mirrors the vitest contract).
+        """EOF-append at module level (PURE aside from reading repo files
+        for free-name resolution; mirrors the vitest contract).
 
-        `target_path` is accepted for signature parity with the vitest
-        harness; free-identifier import resolution is TS-specific and is
-        not implemented for pytest yet (a Python proposal that uses an
-        unimported name still fails honestly).
+        Python free-imports v1, validated against the deepagents board
+        (fp 6ce2d7547255dd83, where 8/20 proposals died on names from
+        another test file's helper ecosystem):
+        - module-level `def test_*(self...)` loses the stray `self` —
+          the model pictured a class context; pytest reads `self` as a
+          fixture and dies at setup;
+        - a free name is bound ONLY when the repo vouches for it
+          unambiguously: the target module defines it, or exactly ONE
+          module-level definition site exists across the project's test
+          files and that file is package-importable. Two sites = no
+          binding — the supabase `setup` collision minted three false
+          gaps under a looser rule, and an honest broken_test beats a
+          wrong import.
         Two blank lines keep the file PEP8-shaped; nothing depends on it."""
         if not test_code:
             return None, "no test supplied"
+        test_code = self._strip_module_level_self(test_code)
         code = self.strip_imports(test_code, pristine).rstrip()
         if not code:
             return None, "test contained only imports"
+        if host_path:
+            imports = self._resolve_free_names(
+                code, pristine, host_path, target_path)
+            if imports:
+                code = "\n".join(imports) + "\n\n" + code
         return pristine.rstrip() + "\n\n\n" + code + "\n", ""
+
+    @staticmethod
+    def _strip_module_level_self(test_code: str) -> str:
+        """def test_x(self) at column 0 -> def test_x(). Deterministic and
+        mechanical; only column-0 defs, only a leading self parameter."""
+        import re as _re
+
+        out = _re.sub(r"^def (test_\w+)\(self\s*,\s*",
+                      r"def \1(", test_code, flags=_re.MULTILINE)
+        return _re.sub(r"^def (test_\w+)\(self\s*\)",
+                       r"def \1()", out, flags=_re.MULTILINE)
+
+    @staticmethod
+    def _module_scope_names(source: str) -> set[str]:
+        import ast as _ast
+
+        names: set[str] = set()
+        try:
+            tree = _ast.parse(source)
+        except SyntaxError:
+            return names
+        for node in tree.body:
+            if isinstance(node, (_ast.FunctionDef, _ast.AsyncFunctionDef,
+                                 _ast.ClassDef)):
+                names.add(node.name)
+            elif isinstance(node, _ast.Assign):
+                for t in node.targets:
+                    if isinstance(t, _ast.Name):
+                        names.add(t.id)
+            elif isinstance(node, _ast.AnnAssign):
+                if isinstance(node.target, _ast.Name):
+                    names.add(node.target.id)
+            elif isinstance(node, _ast.Import):
+                for a in node.names:
+                    names.add((a.asname or a.name).split(".")[0])
+            elif isinstance(node, _ast.ImportFrom):
+                for a in node.names:
+                    if a.name != "*":
+                        names.add(a.asname or a.name)
+        return names
+
+    @staticmethod
+    def _module_scope_defs(source: str) -> set[str]:
+        """Definitions only (def/class/assignment) — no imports. Rule U
+        counts DEFINITION sites; counting imports would make every
+        popular name look ambiguous."""
+        import ast as _ast
+
+        names: set[str] = set()
+        try:
+            tree = _ast.parse(source)
+        except SyntaxError:
+            return names
+        for node in tree.body:
+            if isinstance(node, (_ast.FunctionDef, _ast.AsyncFunctionDef,
+                                 _ast.ClassDef)):
+                names.add(node.name)
+            elif isinstance(node, _ast.Assign):
+                for t in node.targets:
+                    if isinstance(t, _ast.Name):
+                        names.add(t.id)
+            elif isinstance(node, _ast.AnnAssign):
+                if isinstance(node.target, _ast.Name):
+                    names.add(node.target.id)
+        return names
+
+    @staticmethod
+    def _module_imports(source: str) -> dict[str, str]:
+        """name -> module for every `from X import name [as alias]` at
+        module scope. Alias maps the ALIAS (the usable name)."""
+        import ast as _ast
+
+        out: dict[str, str] = {}
+        try:
+            tree = _ast.parse(source)
+        except SyntaxError:
+            return out
+        for node in tree.body:
+            if isinstance(node, _ast.ImportFrom) and node.level == 0 and node.module:
+                for a in node.names:
+                    if a.name != "*":
+                        out[a.asname or a.name] = node.module
+        return out
+
+    @classmethod
+    def _free_names(cls, code: str, pristine: str) -> list[str]:
+        """Load-context names bound nowhere: not in the proposal (any
+        binding construct — overapproximate boundness, so we underbind:
+        the safe direction), not host module scope, not builtins."""
+        import ast as _ast
+        import builtins as _bi
+
+        try:
+            tree = _ast.parse(code)
+        except SyntaxError:
+            return []
+        bound: set[str] = set()
+        loaded: list[str] = []
+        for node in _ast.walk(tree):
+            if isinstance(node, (_ast.FunctionDef, _ast.AsyncFunctionDef,
+                                 _ast.ClassDef)):
+                bound.add(node.name)
+                if hasattr(node, "args"):
+                    a = node.args
+                    for arg in (list(a.posonlyargs) + list(a.args)
+                                + list(a.kwonlyargs)
+                                + ([a.vararg] if a.vararg else [])
+                                + ([a.kwarg] if a.kwarg else [])):
+                        bound.add(arg.arg)
+            elif isinstance(node, _ast.Name):
+                if isinstance(node.ctx, _ast.Store):
+                    bound.add(node.id)
+                elif isinstance(node.ctx, _ast.Load):
+                    loaded.append(node.id)
+            elif isinstance(node, _ast.Import):
+                for a in node.names:
+                    bound.add((a.asname or a.name).split(".")[0])
+            elif isinstance(node, _ast.ImportFrom):
+                for a in node.names:
+                    if a.name != "*":
+                        bound.add(a.asname or a.name)
+            elif isinstance(node, _ast.ExceptHandler) and node.name:
+                bound.add(node.name)
+        host = cls._module_scope_names(pristine)
+        bi = set(dir(_bi))
+        seen: set[str] = set()
+        out: list[str] = []
+        for n in loaded:
+            if n in bound or n in host or n in bi or n in seen:
+                continue
+            seen.add(n)
+            out.append(n)
+        return out
+
+    @classmethod
+    def _resolve_free_names(cls, code: str, pristine: str, host_path: str,
+                            target_path: str | None) -> list[str]:
+        import glob as _glob
+
+        free = cls._free_names(code, pristine)
+        if not free:
+            return []
+        # project root: nearest ancestor of the host with a project marker
+        root = os.path.dirname(os.path.abspath(host_path))
+        while True:
+            if any(os.path.isfile(os.path.join(root, m))
+                   for m in ("pyproject.toml", "setup.cfg", "setup.py")):
+                break
+            parent = os.path.dirname(root)
+            if parent == root:
+                return []
+            root = parent
+
+        def _module_for(path: str) -> str | None:
+            rel = os.path.relpath(os.path.abspath(path), root)
+            if rel.startswith(".."):
+                return None
+            parts = rel[:-3].split(os.sep) if rel.endswith(".py") else None
+            if not parts or parts[-1] == "conftest":
+                return None
+            d = root
+            for comp in parts[:-1]:
+                d = os.path.join(d, comp)
+                if not os.path.isfile(os.path.join(d, "__init__.py")):
+                    return None
+            return ".".join(parts)
+
+        # rule T: the target module itself defines the name
+        by_module: dict[str, list[str]] = {}
+        remaining = list(free)
+        if target_path and os.path.isfile(target_path):
+            try:
+                tnames = cls._module_scope_names(
+                    open(target_path, encoding="utf-8").read())
+            except OSError:
+                tnames = set()
+            tmod = _module_for(target_path)
+            if tmod:
+                hit = [n for n in remaining if n in tnames]
+                if hit:
+                    by_module[tmod] = hit
+                    remaining = [n for n in remaining if n not in hit]
+
+        # rules I and U share one scan of the project's test files
+        if remaining:
+            test_files = [
+                f for f in (_glob.glob(os.path.join(root, "**", "test_*.py"),
+                                       recursive=True)
+                            + _glob.glob(os.path.join(root, "**", "*_test.py"),
+                                         recursive=True))
+                if os.path.abspath(f) != os.path.abspath(host_path)
+                and "node_modules" not in f and ".git" + os.sep not in f
+            ]
+            defs: dict[str, list[str]] = {n: [] for n in remaining}
+            imported_from: dict[str, set[str]] = {n: set() for n in remaining}
+            for f in test_files[:400]:
+                try:
+                    src = open(f, encoding="utf-8").read()
+                except OSError:
+                    continue
+                dnames = cls._module_scope_defs(src)
+                imap = cls._module_imports(src)
+                for n in remaining:
+                    if n in dnames:
+                        defs[n].append(f)
+                    elif n in imap:
+                        imported_from[n].add(imap[n])
+            still: list[str] = []
+            for n in remaining:
+                # rule I (the JS rule-2 analog): other test files import
+                # this exact name — adopt the repo's own import. One
+                # careful relaxation over strict same-module: when every
+                # candidate module descends from one candidate
+                # (deepagents vs deepagents.graph), that's the package
+                # re-export pattern — bind from the ancestor, the public
+                # API surface. UNRELATED modules still refuse: same name
+                # from utils_a and utils_b is the supabase setup trap.
+                mods = imported_from[n]
+                pick = None
+                if not defs[n] and mods:
+                    if len(mods) == 1:
+                        pick = next(iter(mods))
+                    else:
+                        for cand in sorted(mods, key=len):
+                            if all(m == cand or m.startswith(cand + ".")
+                                   for m in mods):
+                                pick = cand
+                                break
+                if pick:
+                    by_module.setdefault(pick, []).append(n)
+                else:
+                    still.append(n)
+            for n in still:
+                # rule U: exactly one DEFINITION site, package-importable.
+                # Two sites = no binding — the supabase `setup` collision.
+                if len(defs[n]) != 1:
+                    continue  # zero or ambiguous: stays free, fails honestly
+                mod = _module_for(defs[n][0])
+                if mod:
+                    by_module.setdefault(mod, []).append(n)
+
+        return [f"from {mod} import {', '.join(sorted(ns))}"
+                for mod, ns in sorted(by_module.items())]
 
     def strip_imports(self, test_code: str, pristine: str = "") -> str:
         """Drop only imports the host file already has (exact line match).
@@ -157,6 +416,10 @@ class PytestHarness(Harness):
         return code if n else None
 
     # ---- run commands ------------------------------------------------------
+
+    # pytest resolves bare paths against cwd, which the verifier sets to
+    # the project dir; commands therefore want project-relative paths.
+    project_relative_cmd_paths = True
 
     def serial_command(self, profile, tests_file: str, title: str,
                        out: str) -> list[str]:
@@ -435,6 +698,16 @@ class PytestHarness(Harness):
             named = [h for h in importers
                      if base in os.path.basename(h)]
             pool = named or importers
+            # A sandboxed gate cannot satisfy integration suites (live
+            # services, provider keys); when unit-side hosts also match,
+            # integration-path files leave the pool. deepagents: the
+            # integration twin imports ChatAnthropic and wants a key.
+            def _is_integration(h: str) -> bool:
+                parts = {p.lower() for p in
+                         os.path.relpath(h, repo).split(os.sep)}
+                return any("integration" in p for p in parts)
+            non_integration = [h for h in pool if not _is_integration(h)]
+            pool = non_integration or pool
             if len(pool) == 1:
                 return os.path.relpath(pool[0], repo)
 

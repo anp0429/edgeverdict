@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import os
+import posixpath
 import re
 import shutil
 import subprocess
@@ -344,7 +345,77 @@ def _docker_backend_selected() -> bool:
     return os.environ.get("EDGEVERDICT_EXECUTION_BACKEND", "docker").strip().lower() != "local"
 
 
-def _python_sandbox_install(scan_root: str) -> list[str]:
+def _host_file_install_supplement(scan_root: str, tests_file: str) -> list[str]:
+    """Distributions the HOST tests file needs that declared deps may miss.
+
+    The vitest lane never has this problem: npm install reads the complete
+    devDependencies. Python repos routinely under-declare test deps
+    (posthog-python declares a single dev dependency), so the host file's
+    own imports — and every conftest.py on its path, which load at
+    collect time — are an install input. Rules keep it conservative:
+    module-level imports only; stdlib excluded; modules that exist in the
+    repo tree excluded (they're local code, not distributions); relative
+    imports excluded; PEP 503 makes underscore names pip-installable
+    as-is, so only classic name-diverging cases are mapped. This runs
+    only for the sandboxed lane, where installs land in a filesystem
+    that evaporates with the run.
+    """
+    import ast
+    import sys
+
+    mapping = {
+        "yaml": "PyYAML", "PIL": "Pillow", "cv2": "opencv-python",
+        "sklearn": "scikit-learn", "dotenv": "python-dotenv",
+        "attr": "attrs", "dateutil": "python-dateutil", "bs4": "beautifulsoup4",
+    }
+    stdlib = set(getattr(sys, "stdlib_module_names", ()))
+
+    files: list[str] = []
+    tf_abs = os.path.join(scan_root, tests_file) if not os.path.isabs(tests_file) else tests_file
+    if os.path.isfile(tf_abs):
+        files.append(tf_abs)
+    walk = os.path.dirname(tf_abs)
+    root_norm = os.path.normpath(scan_root)
+    while True:
+        c = os.path.join(walk, "conftest.py")
+        if os.path.isfile(c):
+            files.append(c)
+        if os.path.normpath(walk) == root_norm or len(walk) <= len(root_norm):
+            break
+        parent = os.path.dirname(walk)
+        if parent == walk:
+            break
+        walk = parent
+
+    tops: list[str] = []
+    for f in files:
+        try:
+            tree = ast.parse(open(f, encoding="utf-8").read())
+        except Exception:
+            continue
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                tops.extend(a.name.split(".")[0] for a in node.names)
+            elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
+                tops.append(node.module.split(".")[0])
+
+    out: list[str] = []
+    seen: set[str] = set()
+    for name in tops:
+        if not name or name in seen or name in stdlib:
+            continue
+        seen.add(name)
+        # local repo code, not a distribution
+        if (os.path.isdir(os.path.join(scan_root, name))
+                or os.path.isfile(os.path.join(scan_root, name + ".py"))
+                or os.path.isdir(os.path.join(scan_root, "src", name))
+                or os.path.isdir(os.path.join(scan_root, "tests", name))):
+            continue
+        out.append(mapping.get(name, name))
+    return sorted(out)[:40]
+
+
+def _python_sandbox_install(scan_root: str, tests_file: str = "") -> list[str]:
     """Editable-install command for the sandboxed python lane.
 
     Installs the project at the detected project dir, adding a declared
@@ -397,8 +468,10 @@ def _python_sandbox_install(scan_root: str) -> list[str]:
     # that is both writable and executable (noexec /tmp would break
     # compiled wheels). --no-cache-dir: there is no writable home for a
     # pip cache. Harmless under any backend; only emitted for docker.
+    supplement = (_host_file_install_supplement(scan_root, tests_file)
+                  if tests_file else [])
     return ["python", "-m", "pip", "install", "--quiet", "--user",
-            "--no-cache-dir", "-e", spec, *group_reqs]
+            "--no-cache-dir", "-e", spec, *group_reqs, *supplement]
 
 
 def build_profile(repo_root: str, cfg: Config, tests_file: str,
@@ -421,12 +494,24 @@ def build_profile(repo_root: str, cfg: Config, tests_file: str,
         test_base = [sys.executable, "-m", "pytest"]
         prof = RepoProfile(
             name=os.path.basename(repo_root.rstrip("/")),
-            install_cmd=(_python_sandbox_install(scan_root)
+            install_cmd=(_python_sandbox_install(
+                             scan_root,
+                             posixpath.relpath(
+                                 tests_file.replace(os.sep, "/"),
+                                 (project_dir or ".").replace(os.sep, "/")))
                          if _docker_backend_selected() else []),
             test_base=test_base,
             build_cmd=None,
             env={"CI": "true"},
-            smoke_cmd=test_base + ["--collect-only", "-q", tests_file],
+            # The toolchain executes with cwd = project_dir; in a python
+            # monorepo the repo-relative tests path would double the prefix
+            # (libs/pkg/libs/pkg/...) and collect nothing. Root projects
+            # are unchanged: relpath against "." is the identity.
+            smoke_cmd=test_base + [
+                "--collect-only", "-q",
+                posixpath.relpath(tests_file.replace(os.sep, "/"),
+                                  (project_dir or ".").replace(os.sep, "/")),
+            ],
             kind="pytest",
         )
         if cfg.harness_notes:
@@ -470,7 +555,6 @@ def build_profile(repo_root: str, cfg: Config, tests_file: str,
                 # --filter execs inside the package dir, so the path handed
                 # to vitest must be package-relative; the probe FILE keeps
                 # its repo-relative path (write base is the repo root).
-                import posixpath
                 cmd_rel = posixpath.relpath(rel, ws_dir)
             prof.smoke_cmd = prof.smoke_cmd[:-1] + [cmd_rel]
     if cfg.harness_notes:

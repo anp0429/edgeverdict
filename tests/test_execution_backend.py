@@ -409,3 +409,266 @@ def test_pytest_profile_reads_dependency_groups(monkeypatch, tmp_path):
         "python", "-m", "pip", "install", "--quiet", "--user",
         "--no-cache-dir", "-e", ".", "pytest-socket", "ruff",
     ]
+
+
+# --- pytest monorepo paths (sig EDGEVERDICT_PYMONO_PATH_TESTS_V1) ---
+
+
+def _mono(tmp_path):
+    import os
+
+    pkg = tmp_path / "libs" / "pkg"
+    (pkg / "tests").mkdir(parents=True)
+    (pkg / "pyproject.toml").write_text(
+        "[project]\nname = \"pkg\"\nversion = \"0\"\n"
+    )
+    (pkg / "tests" / "test_x.py").write_text("def test_ok():\n    assert True\n")
+    return str(tmp_path), os.path.join("libs", "pkg")
+
+
+def test_pytest_smoke_path_is_project_relative_in_monorepo(monkeypatch, tmp_path):
+    """cwd is the project dir, so a repo-relative smoke path doubles the
+    prefix (libs/pkg/libs/pkg/...) and collects nothing — the deepagents
+    STOPPED run. The command path must be project-relative."""
+    from edgeverdict.config import Config, build_profile
+
+    monkeypatch.setenv("EDGEVERDICT_EXECUTION_BACKEND", "local")
+    repo, pd = _mono(tmp_path)
+    prof = build_profile(repo, Config(), "libs/pkg/tests/test_x.py",
+                         project_dir=pd)
+    assert prof.smoke_cmd[-1] == "tests/test_x.py"
+
+
+def test_pytest_smoke_path_unchanged_for_root_projects(monkeypatch, tmp_path):
+    """Root-project repos (the whole python gauntlet) keep the exact old
+    path — relpath against '.' is the identity."""
+    from edgeverdict.config import Config, build_profile
+
+    monkeypatch.setenv("EDGEVERDICT_EXECUTION_BACKEND", "local")
+    (tmp_path / "pyproject.toml").write_text(
+        "[project]\nname = \"x\"\nversion = \"0\"\n"
+    )
+    (tmp_path / "test_x.py").write_text("def test_ok():\n    assert True\n")
+    prof = build_profile(str(tmp_path), Config(), "test_x.py")
+    assert prof.smoke_cmd[-1] == "test_x.py"
+
+
+def test_verifier_translates_pytest_command_path(monkeypatch, tmp_path):
+    """The run-time commands (serial/batch) get the project-relative path;
+    injection keeps writing at the repo-relative path."""
+    from edgeverdict.config import Config, build_profile
+    from edgeverdict.verifiers.finding_verifier import FindingVerifier
+    from edgeverdict.verifiers.pytest_harness import PytestHarness
+
+    monkeypatch.setenv("EDGEVERDICT_EXECUTION_BACKEND", "local")
+    monkeypatch.setenv("EDGEVERDICT_ALLOW_UNSAFE_LOCAL", "1")
+    repo, pd = _mono(tmp_path)
+    prof = build_profile(repo, Config(), "libs/pkg/tests/test_x.py",
+                         project_dir=pd)
+    v = FindingVerifier(repo, prof, tests_file="libs/pkg/tests/test_x.py",
+                        project_dir=pd, harness=PytestHarness(),
+                        log=lambda *a, **k: None)
+    assert v._cmd_tests_file == "tests/test_x.py"
+    assert v.tests_file == "libs/pkg/tests/test_x.py"
+    cmd = v.harness.serial_command(prof, v._cmd_tests_file, "t", "/tmp/o.xml")
+    assert any(a.startswith("tests/test_x.py") for a in cmd)
+
+
+def test_resolver_prefers_unit_host_over_integration(tmp_path):
+    """When unit and integration hosts both import the target, the
+    integration one leaves the pool: a sandbox can't satisfy live-service
+    suites (the deepagents integration twin imports ChatAnthropic)."""
+    import os
+
+    from edgeverdict.verifiers.pytest_harness import PytestHarness
+
+    pkg = tmp_path / "libs" / "pkg"
+    (pkg / "pkgmod").mkdir(parents=True)
+    (pkg / "tests" / "unit_tests").mkdir(parents=True)
+    (pkg / "tests" / "integration_tests").mkdir(parents=True)
+    (pkg / "pkgmod" / "filesystem.py").write_text("def f():\n    return 1\n")
+    (pkg / "tests" / "unit_tests" / "test_filesystem_init.py").write_text(
+        "from pkgmod import filesystem\n\ndef test_a():\n    assert filesystem.f() == 1\n"
+    )
+    (pkg / "tests" / "integration_tests" / "test_filesystem_live.py").write_text(
+        "from pkgmod import filesystem\n\ndef test_b():\n    assert filesystem.f() == 1\n"
+    )
+    picked = PytestHarness.default_tests_for(
+        str(tmp_path), os.path.join("libs", "pkg", "pkgmod", "filesystem.py")
+    )
+    assert picked is not None
+    assert "integration" not in picked
+    assert picked.endswith("test_filesystem_init.py")
+
+
+# --- host-file install supplement (sig EDGEVERDICT_HOSTFILE_INSTALL_TESTS_V1) ---
+
+
+def test_host_file_imports_supplement_the_install(monkeypatch, tmp_path):
+    """Undeclared external imports in the host tests file (and its
+    conftest chain, which loads at collect) join the install command;
+    stdlib, local modules, and relative imports stay out. The vitest
+    lane gets this for free from package.json; python repos
+    under-declare (posthog-python: one dev dep)."""
+    from edgeverdict.config import Config, build_profile
+
+    (tmp_path / "pyproject.toml").write_text(
+        "[project]\nname = \"fixture\"\nversion = \"0\"\n"
+    )
+    (tmp_path / "localmod.py").write_text("x = 1\n")
+    (tmp_path / "conftest.py").write_text(
+        "import os\nimport pytest_socket\n"
+    )
+    (tmp_path / "test_x.py").write_text(
+        "import json\n"
+        "import localmod\n"
+        "import yaml\n"
+        "from responses import activate\n"
+        "from . import nothing  # relative: excluded\n"
+        "\ndef test_ok():\n    assert localmod.x == 1\n"
+    )
+    monkeypatch.setenv("EDGEVERDICT_EXECUTION_BACKEND", "docker")
+    prof = build_profile(str(tmp_path), Config(), "test_x.py")
+    cmd = prof.install_cmd
+    assert "PyYAML" in cmd            # mapped divergent name
+    assert "responses" in cmd         # from-import external
+    assert "pytest_socket" in cmd     # conftest chain included
+    assert "json" not in cmd          # stdlib excluded
+    assert "localmod" not in cmd      # repo-local excluded
+    assert cmd[:8] == ["python", "-m", "pip", "install", "--quiet",
+                       "--user", "--no-cache-dir", "-e"]
+
+
+def test_supplement_uses_project_relative_host_in_monorepo(monkeypatch, tmp_path):
+    """The supplement resolves the host file inside the project dir, so
+    monorepo paths don't double the prefix here either."""
+    from edgeverdict.config import Config, build_profile
+
+    repo, pd = _mono(tmp_path)
+    import os as _os
+
+    (tmp_path / "libs" / "pkg" / "tests" / "test_x.py").write_text(
+        "import yaml\n\ndef test_ok():\n    assert True\n"
+    )
+    monkeypatch.setenv("EDGEVERDICT_EXECUTION_BACKEND", "docker")
+    prof = build_profile(repo, Config(),
+                         _os.path.join("libs", "pkg", "tests", "test_x.py"),
+                         project_dir=pd)
+    assert "PyYAML" in prof.install_cmd
+
+
+# --- python free-imports v1 (sig EDGEVERDICT_PYFREE_IMPORTS_TESTS_V1) ---
+
+
+def _freeimports_repo(tmp_path):
+
+    (tmp_path / "pyproject.toml").write_text(
+        "[project]\nname = \"pkg\"\nversion = \"0\"\n"
+    )
+    pkg = tmp_path / "pkgapi"
+    pkg.mkdir()
+    (pkg / "__init__.py").write_text("from pkgapi.core import make_widget\n")
+    (pkg / "core.py").write_text(
+        "from json import dumps\n\n\ndef make_widget():\n    return 1\n"
+    )
+    t = tmp_path / "tests"
+    (t).mkdir()
+    (t / "__init__.py").write_text("")
+    (t / "test_helpers.py").write_text(
+        "from pkgapi.core import make_widget\n\n"
+        "class FakeModel:\n    def __init__(self):\n        self.x = 41\n\n"
+        "def _bump(m):\n    return m.x + 1\n"
+    )
+    (t / "test_other.py").write_text(
+        "from pkgapi import make_widget\n\n"
+        "def helper_two():\n    return 2\n"
+    )
+    host = t / "test_host.py"
+    host.write_text("import json\n\n\ndef test_existing():\n    assert True\n")
+    return str(tmp_path), str(host)
+
+
+def test_free_imports_bind_unique_definition_and_execute(tmp_path):
+    """A helper class with exactly one definition site binds and the
+    injected test EXECUTES to a real verdict — the deepagents
+    FixedGenericFakeChatModel case in miniature."""
+    import subprocess
+    import sys
+
+    from edgeverdict.verifiers.pytest_harness import PytestHarness
+
+    repo, host = _freeimports_repo(tmp_path)
+    pristine = open(host).read()
+    code = ("def test_uses_helpers(self):\n"
+            "    m = FakeModel()\n"
+            "    assert _bump(m) == 42\n")
+    injected, err = PytestHarness().inject(pristine, code, host_path=host)
+    assert injected is not None
+    assert "from tests.test_helpers import FakeModel, _bump" in injected
+    assert "def test_uses_helpers():" in injected  # self stripped
+    open(host, "w").write(injected)
+    r = subprocess.run(
+        [sys.executable, "-m", "pytest", host + "::test_uses_helpers",
+         "-x", "-q", "-p", "no:cacheprovider"],
+        cwd=repo, capture_output=True, text=True, timeout=120)
+    assert r.returncode == 0, r.stdout[-800:]
+
+
+def test_free_imports_refuse_ambiguous_definitions(tmp_path):
+    """Two definition sites for one name = NO binding: the supabase
+    `setup` collision minted false gaps under a looser rule."""
+    from edgeverdict.verifiers.pytest_harness import PytestHarness
+
+    repo, host = _freeimports_repo(tmp_path)
+    (tmp_path / "tests" / "test_more.py").write_text(
+        "class FakeModel:\n    pass\n"
+    )
+    pristine = open(host).read()
+    code = "def test_x():\n    assert FakeModel is not None\n"
+    injected, _ = PytestHarness().inject(pristine, code, host_path=host)
+    assert "FakeModel" in injected
+    assert "import FakeModel" not in injected  # stays free, fails honestly
+
+
+def test_free_imports_adopt_repo_import_with_ancestor_collapse(tmp_path):
+    """A name other test files import from pkgapi and pkgapi.core binds
+    from the ancestor package (re-export pattern); unrelated modules
+    would refuse."""
+    from edgeverdict.verifiers.pytest_harness import PytestHarness
+
+    repo, host = _freeimports_repo(tmp_path)
+    pristine = open(host).read()
+    code = "def test_w():\n    assert make_widget is not None\n"
+    injected, _ = PytestHarness().inject(pristine, code, host_path=host)
+    assert "from pkgapi import make_widget" in injected
+
+
+def test_free_imports_refuse_unrelated_import_sources(tmp_path):
+    """Same name imported from two UNRELATED modules refuses — that is
+    genuine ambiguity, not a re-export."""
+    from edgeverdict.verifiers.pytest_harness import PytestHarness
+
+    repo, host = _freeimports_repo(tmp_path)
+    (tmp_path / "tests" / "test_third.py").write_text(
+        "from otherlib import make_widget\n"
+    )
+    pristine = open(host).read()
+    code = "def test_w():\n    assert make_widget is not None\n"
+    injected, _ = PytestHarness().inject(pristine, code, host_path=host)
+    assert "import make_widget" not in injected
+
+
+def test_free_imports_bind_from_target_module(tmp_path):
+    """Rule T: the target module's own scope (including re-exports)
+    vouches for a name."""
+
+    from edgeverdict.verifiers.pytest_harness import PytestHarness
+
+    repo, host = _freeimports_repo(tmp_path)
+    pkg = tmp_path / "pkgapi"
+    pristine = open(host).read()
+    code = "def test_t():\n    assert dumps({}) == '{}'\n"
+    injected, _ = PytestHarness().inject(
+        pristine, code, host_path=host,
+        target_path=str(pkg / "core.py"))
+    assert "from pkgapi.core import dumps" in injected
