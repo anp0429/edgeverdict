@@ -116,6 +116,10 @@ class RepoProfile:
     install_cmd: list[str]
     test_base: list[str]
     build_cmd: list[str] | None = None          # None => no build step
+    # A declared-deps-only install to retry with when the primary install
+    # carries heuristic supplements (host-file imports) and fails: a
+    # guessed package name must never be able to bench the whole run.
+    install_fallback_cmd: list[str] | None = None
     env: dict[str, str] = field(default_factory=lambda: {"CI": "true"})
     # Repo-specific rules the reviewer must follow when WRITING tests (harness
     # setup sequences, required helpers, gotchas). Injected into the reviewer

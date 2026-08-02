@@ -255,6 +255,15 @@ class FindingVerifier:
                     self.log("  install: frozen lockfile install failed; "
                              "retrying with --no-frozen-lockfile")
                     inst = self._run(retry, self._workdir(repo))
+                fallback = getattr(self.profile, "install_fallback_cmd", None)
+                if (inst.returncode != 0 and fallback
+                        and fallback != self.profile.install_cmd):
+                    # the primary install carries heuristic host-file
+                    # supplements; a guessed package name must never bench
+                    # the run — degrade to declared deps only, out loud.
+                    self.log("  install: supplemented install failed; "
+                             "retrying with declared dependencies only")
+                    inst = self._run(fallback, self._workdir(repo))
                 phases.append(f"install {time.monotonic() - t0:.1f}s")
                 if inst.returncode != 0:
                     self._prep_error = f"install failed: {_proc_tail(inst)}"

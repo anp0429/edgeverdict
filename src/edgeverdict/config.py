@@ -387,13 +387,46 @@ def _host_file_install_supplement(scan_root: str, tests_file: str) -> list[str]:
             break
         walk = parent
 
+    def _optional_import_lines(tree) -> set[int]:
+        """Line numbers of imports inside try/except ImportError blocks —
+        optional by construction (py2 fallbacks like `from Queue import
+        Queue` in posthog-python's tests broke the whole install when the
+        supplement tried to pip install the py2 stdlib name)."""
+        out: set[int] = set()
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Try):
+                continue
+            names = []
+            for h in node.handlers:
+                t = h.type
+                subs: list = []
+                if isinstance(t, ast.Tuple):
+                    subs = list(t.elts)
+                elif t is not None:
+                    subs = [t]
+                for sub in subs:
+                    if isinstance(sub, ast.Name):
+                        names.append(sub.id)
+            if not any(n in ("ImportError", "ModuleNotFoundError", "Exception")
+                       for n in names):
+                continue
+            for part in list(node.body) + [x for h in node.handlers
+                                           for x in h.body]:
+                for sub in ast.walk(part):
+                    if isinstance(sub, (ast.Import, ast.ImportFrom)):
+                        out.add(sub.lineno)
+        return out
+
     tops: list[str] = []
     for f in files:
         try:
             tree = ast.parse(open(f, encoding="utf-8").read())
         except Exception:
             continue
+        optional = _optional_import_lines(tree)
         for node in ast.walk(tree):
+            if getattr(node, "lineno", None) in optional:
+                continue
             if isinstance(node, ast.Import):
                 tops.extend(a.name.split(".")[0] for a in node.names)
             elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
@@ -401,8 +434,9 @@ def _host_file_install_supplement(scan_root: str, tests_file: str) -> list[str]:
 
     out: list[str] = []
     seen: set[str] = set()
+    lowered_stdlib = {m.lower() for m in stdlib}
     for name in tops:
-        if not name or name in seen or name in stdlib:
+        if not name or name in seen or name.lower() in lowered_stdlib:
             continue
         seen.add(name)
         # local repo code, not a distribution
@@ -500,6 +534,8 @@ def build_profile(repo_root: str, cfg: Config, tests_file: str,
                                  tests_file.replace(os.sep, "/"),
                                  (project_dir or ".").replace(os.sep, "/")))
                          if _docker_backend_selected() else []),
+            install_fallback_cmd=(_python_sandbox_install(scan_root)
+                                  if _docker_backend_selected() else None),
             test_base=test_base,
             build_cmd=None,
             env={"CI": "true"},

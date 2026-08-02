@@ -732,3 +732,49 @@ def test_fail_closed_error_names_sandbox_build(monkeypatch):
     with _pytest.raises(ExecutionConfigurationError) as e:
         DockerBackend(log=lambda *a, **k: None)
     assert "sandbox-build" in str(e.value)
+
+
+# --- supplement hardening (sig EDGEVERDICT_SUPPLEMENT_HARDENING_TESTS_V1) ---
+
+
+def test_optional_py2_imports_stay_out_of_the_supplement(monkeypatch, tmp_path):
+    """Imports inside try/except ImportError are optional by construction:
+    posthog-python's py2 fallback `from Queue import Queue` must not become
+    `pip install Queue` (which killed the whole install). Case differences
+    from modern stdlib names are excluded too."""
+    from edgeverdict.config import Config, build_profile
+
+    (tmp_path / "pyproject.toml").write_text(
+        "[project]\nname = \"fixture\"\nversion = \"0\"\n"
+    )
+    (tmp_path / "test_x.py").write_text(
+        "try:\n"
+        "    from queue import Queue\n"
+        "except ImportError:\n"
+        "    from Queue import Queue\n"
+        "import parameterized\n"
+        "\ndef test_ok():\n    assert Queue is not None\n"
+    )
+    monkeypatch.setenv("EDGEVERDICT_EXECUTION_BACKEND", "docker")
+    prof = build_profile(str(tmp_path), Config(), "test_x.py")
+    assert "Queue" not in prof.install_cmd
+    assert "parameterized" in prof.install_cmd
+
+
+def test_profile_carries_declared_only_fallback(monkeypatch, tmp_path):
+    """When the install carries supplements, the profile also carries a
+    declared-deps-only fallback so a guessed name can never bench the run."""
+    from edgeverdict.config import Config, build_profile
+
+    (tmp_path / "pyproject.toml").write_text(
+        "[project]\nname = \"fixture\"\nversion = \"0\"\n"
+    )
+    (tmp_path / "test_x.py").write_text(
+        "import parameterized\n\ndef test_ok():\n    assert True\n"
+    )
+    monkeypatch.setenv("EDGEVERDICT_EXECUTION_BACKEND", "docker")
+    prof = build_profile(str(tmp_path), Config(), "test_x.py")
+    assert "parameterized" in prof.install_cmd
+    assert prof.install_fallback_cmd is not None
+    assert "parameterized" not in prof.install_fallback_cmd
+    assert prof.install_fallback_cmd[:4] == ["python", "-m", "pip", "install"]
