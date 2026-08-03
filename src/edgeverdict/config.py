@@ -131,12 +131,22 @@ def detect_vitest_projects(repo_root: str) -> list[str]:
     return names
 
 
-def detect_profile_kind(repo_root: str) -> str:
-    """Infer the toolchain from the repo's own marker files. A JS lockfile
-    wins over Python markers (a Python repo that ships a lockfile is
-    declaring a JS toolchain; the reverse — a JS repo with a stray
-    pyproject — does not happen). pnpm wins if both JS lockfiles exist
-    (pnpm repos often keep a stray package-lock around)."""
+def detect_profile_kind(repo_root: str, tests_file: str = "") -> str:
+    """Infer the toolchain from the repo's own marker files, letting the
+    file that is about to EXECUTE break polyglot ties. The old rule ("a JS
+    lockfile wins over Python markers; a JS repo with a stray pyproject
+    does not happen") met its counterexample in posthog/posthog: a true
+    polyglot monorepo with pnpm-lock.yaml AND pyproject.toml at the root,
+    where the review target and host were Python. JS-wins ran pnpm install
+    six times (frontend workspaces, node-rdkafka builds) while the python
+    env stayed empty, and every python execution broke on missing deps —
+    a whole run of environmental false "broken". A .py tests_file names
+    pytest as the harness, so it names the installer too. No hint, or a
+    JS-suffixed hint, preserves the legacy order exactly. pnpm wins if
+    both JS lockfiles exist (pnpm repos often keep a stray package-lock
+    around)."""
+    if tests_file.endswith(".py") and _python_markers(repo_root):
+        return "pytest"
     if os.path.isfile(os.path.join(repo_root, "pnpm-lock.yaml")):
         return "pnpm-vitest"
     if os.path.isfile(os.path.join(repo_root, "package-lock.json")):
@@ -145,10 +155,17 @@ def detect_profile_kind(repo_root: str) -> str:
         return "pnpm-vitest"  # closest preset; user can override in config
     # Python: pytest's own config file, any pyproject, or a setup.cfg that
     # carries a pytest section. Deliberately after the lockfile checks.
+    if _python_markers(repo_root):
+        return "pytest"
+    return ""
+
+
+def _python_markers(repo_root: str) -> bool:
+    """The python-toolchain evidence detect_profile_kind trusts."""
     if os.path.isfile(os.path.join(repo_root, "pytest.ini")):
-        return "pytest"
+        return True
     if os.path.isfile(os.path.join(repo_root, "pyproject.toml")):
-        return "pytest"
+        return True
     setup_cfg = os.path.join(repo_root, "setup.cfg")
     if os.path.isfile(setup_cfg):
         try:
@@ -158,8 +175,8 @@ def detect_profile_kind(repo_root: str) -> str:
         # both spellings seen in the wild: [tool:pytest] is the documented
         # one; [tool.pytest] appears in files converted from pyproject.
         if "[tool:pytest]" in text or "[tool.pytest" in text:
-            return "pytest"
-    return ""
+            return True
+    return False
 
 
 LOCKFILES = ("pnpm-lock.yaml", "package-lock.json", "yarn.lock", "bun.lockb")
@@ -504,14 +521,69 @@ def _python_sandbox_install(scan_root: str, tests_file: str = "") -> list[str]:
     # pip cache. Harmless under any backend; only emitted for docker.
     supplement = (_host_file_install_supplement(scan_root, tests_file)
                   if tests_file else [])
+
+    # Editable install requires a build backend. A repo with no
+    # [build-system] table is not a buildable distribution -- pip falls
+    # back to legacy setuptools, which cannot package a flat multi-package
+    # tree and dies in seconds ("Failed to build ... when getting
+    # requirements to build editable"). posthog/posthog is the vote: a
+    # uv-managed project ([project] + uv.lock, NO [build-system]) meant to
+    # run in-place with the repo root on the path, never pip-installed as a
+    # package. For that shape, install the DEPENDENCIES only and skip the
+    # -e . build: the container workdir is already the repo root, so
+    # `posthog` imports straight from the tree once its deps are present.
+    # Repos WITH a build-system keep the editable install unchanged.
+    if not _has_build_system(scan_root):
+        deps = _declared_dependencies(scan_root)
+        return ["python", "-m", "pip", "install", "--quiet", "--user",
+                "--no-cache-dir", *deps, *group_reqs, *supplement]
+
     return ["python", "-m", "pip", "install", "--quiet", "--user",
             "--no-cache-dir", "-e", spec, *group_reqs, *supplement]
+
+
+def _has_build_system(scan_root: str) -> bool:
+    """True when pyproject declares a build backend -- the precondition for
+    an editable install. Absent table => not a buildable distribution."""
+    pyproject = os.path.join(scan_root, "pyproject.toml")
+    if not os.path.isfile(pyproject):
+        # setup.py/setup.cfg projects are setuptools-buildable by definition.
+        return (os.path.isfile(os.path.join(scan_root, "setup.py"))
+                or os.path.isfile(os.path.join(scan_root, "setup.cfg")))
+    try:
+        import tomllib
+        with open(pyproject, "rb") as fh:
+            data = tomllib.load(fh)
+    except (OSError, ValueError):
+        return False
+    return bool(data.get("build-system", {}).get("build-backend")
+                or data.get("build-system", {}).get("requires"))
+
+
+def _declared_dependencies(scan_root: str) -> list[str]:
+    """[project.dependencies] as install args, for the deps-only lane used
+    when a repo has no build-system. Test/dev extras and PEP 735 groups are
+    added by the caller; the host-file supplement covers third-party
+    imports the manifest may miss. Returns [] on any parse trouble -- the
+    supplement and declared groups still install, and smoke names whatever
+    is genuinely missing."""
+    pyproject = os.path.join(scan_root, "pyproject.toml")
+    if not os.path.isfile(pyproject):
+        return []
+    try:
+        import tomllib
+        with open(pyproject, "rb") as fh:
+            data = tomllib.load(fh)
+    except (OSError, ValueError):
+        return []
+    deps = data.get("project", {}).get("dependencies", [])
+    return [d for d in deps if isinstance(d, str)]
 
 
 def build_profile(repo_root: str, cfg: Config, tests_file: str,
                   project_dir: str = ".") -> RepoProfile:
     scan_root = os.path.normpath(os.path.join(repo_root, project_dir))
-    kind = cfg.profile_kind or detect_profile_kind(scan_root)
+    kind = cfg.profile_kind or detect_profile_kind(scan_root, tests_file)
     if kind == "pytest":
         # Python profile. Under the LOCAL backend there is no install step:
         # the gate runs in the environment the operator already provisioned,

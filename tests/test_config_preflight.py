@@ -63,6 +63,41 @@ def test_detect_profile_from_lockfile(tmp_path):
     assert detect_profile_kind(d) == "pnpm-vitest"  # pnpm wins when both exist
 
 
+EDGEVERDICT_POLYGLOT_PROFILE_TESTS_V1 = True
+
+
+def test_polyglot_repo_python_host_picks_pytest(tmp_path):
+    # posthog regression: pnpm-lock.yaml AND pyproject.toml at the root.
+    # The executing test file's language must name the toolchain, or the
+    # installer builds the frontend while the python env stays empty.
+    d = str(tmp_path)
+    (tmp_path / "pnpm-lock.yaml").write_text("")
+    (tmp_path / "pyproject.toml").write_text("[project]\nname='x'\n")
+    assert detect_profile_kind(d, "posthog/hogql/test/test_type_system.py") == "pytest"
+
+
+def test_polyglot_repo_js_host_keeps_js_profile(tmp_path):
+    d = str(tmp_path)
+    (tmp_path / "pnpm-lock.yaml").write_text("")
+    (tmp_path / "pyproject.toml").write_text("[project]\nname='x'\n")
+    assert detect_profile_kind(d, "src/thing.test.ts") == "pnpm-vitest"
+
+
+def test_polyglot_repo_no_hint_preserves_legacy_js_wins(tmp_path):
+    d = str(tmp_path)
+    (tmp_path / "pnpm-lock.yaml").write_text("")
+    (tmp_path / "pyproject.toml").write_text("[project]\nname='x'\n")
+    assert detect_profile_kind(d) == "pnpm-vitest"
+
+
+def test_py_hint_without_python_markers_stays_js(tmp_path):
+    # a .py hint is not a license to invent a python toolchain the repo
+    # never declared; markers still required.
+    d = str(tmp_path)
+    (tmp_path / "pnpm-lock.yaml").write_text("")
+    assert detect_profile_kind(d, "scripts/util_test.py") == "pnpm-vitest"
+
+
 def test_preflight_flags_everything_wrong_at_once(tmp_path, monkeypatch):
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     problems = preflight(

@@ -15,10 +15,12 @@ per-finding noise and never as a crash.
 from __future__ import annotations
 
 import os
+import shutil
 
 from edgeverdict.verifiers.finding_verifier import (
     FindingVerifier,
     _copy_discrepancies,
+    _faithful_copy,
 )
 from edgeverdict.verifiers.vitest_verifier import RepoProfile
 
@@ -62,6 +64,47 @@ def test_fidelity_catches_a_dropped_config_file(tmp_path):
     _make_tree(dst, {"a.py": "x"})
     diffs = _copy_discrepancies(src, dst)
     assert diffs == ["missing from sandbox: pnpm-workspace.yaml"]
+
+
+EDGEVERDICT_FIDELITY_SYMLINK_TESTS_V1 = True
+
+
+def test_fidelity_symlinked_dir_survives_the_real_copy(tmp_path):
+    # posthog regression: .claude/skills is a symlinked directory. The
+    # production copy must preserve the link so the checker (which never
+    # descends symlinked dirs, on either side) sees identical manifests.
+    src = str(tmp_path / "src")
+    _make_tree(src, {"a.py": "x", "shared/skills/SKILL.md": "doc"})
+    os.makedirs(os.path.join(src, ".claude"), exist_ok=True)
+    os.symlink(os.path.join("..", "shared", "skills"),
+               os.path.join(src, ".claude", "skills"))
+    dst = str(tmp_path / "dst")
+    _faithful_copy(src, dst)
+    assert _copy_discrepancies(src, dst) == []
+    assert os.path.islink(os.path.join(dst, ".claude", "skills"))
+
+
+def test_fidelity_symlinked_file_survives_the_real_copy(tmp_path):
+    src = str(tmp_path / "src")
+    _make_tree(src, {"real.cfg": "kv"})
+    os.symlink("real.cfg", os.path.join(src, "alias.cfg"))
+    dst = str(tmp_path / "dst")
+    _faithful_copy(src, dst)
+    assert _copy_discrepancies(src, dst) == []
+
+
+def test_fidelity_still_catches_a_dereferencing_copy(tmp_path):
+    # regression guard for the bug itself: a deref copy (the old behavior)
+    # materializes the linked dir's files and MUST be reported as extra.
+    src = str(tmp_path / "src")
+    _make_tree(src, {"a.py": "x", "shared/skills/SKILL.md": "doc"})
+    os.makedirs(os.path.join(src, ".claude"), exist_ok=True)
+    os.symlink(os.path.join("..", "shared", "skills"),
+               os.path.join(src, ".claude", "skills"))
+    dst = str(tmp_path / "dst")
+    shutil.copytree(src, dst, symlinks=False)
+    diffs = _copy_discrepancies(src, dst)
+    assert any("extra in sandbox" in d and ".claude" in d for d in diffs)
 
 
 def test_fidelity_catches_truncated_file(tmp_path):

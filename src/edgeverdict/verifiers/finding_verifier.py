@@ -56,6 +56,29 @@ _test_title = _VITEST.test_title
 _COPY_IGNORES = {".git", "node_modules", "dist", "__pycache__"}
 
 
+def _faithful_copy(src: str, dst: str) -> None:
+    """The one copy step the fidelity check vouches for.
+
+    symlinks=True is load-bearing: posthog's repo ships .claude/skills as a
+    symlinked DIRECTORY, and the default deref copy materialized its files
+    into the sandbox while os.walk (which never descends symlinked dirs)
+    left them out of the host manifest — every file under the link became
+    "extra in sandbox" and run 6 was vetoed without executing anything.
+    Preserving links keeps copy and checker in the same symlink semantics,
+    and closes a fidelity hole besides: dereferencing a repo symlink that
+    points OUTSIDE the repo would silently import host files into the
+    sandbox. Kept next to _copy_discrepancies so the pair stays honest.
+    """
+    shutil.copytree(
+        src,
+        dst,
+        symlinks=True,
+        ignore=shutil.ignore_patterns(
+            ".git", "node_modules", "dist", "__pycache__"
+        ),
+    )
+
+
 def _copy_discrepancies(src: str, dst: str, limit: int = 5) -> list[str]:
     """Compare two trees (pruning _COPY_IGNORES) by relative path and size.
 
@@ -214,13 +237,7 @@ class FindingVerifier:
         repo = os.path.join(self._warm_root, "repo")
         phases: list[str] = []
         t0 = time.monotonic()
-        shutil.copytree(
-            self.repo_root,
-            repo,
-            ignore=shutil.ignore_patterns(
-                ".git", "node_modules", "dist", "__pycache__"
-            ),
-        )
+        _faithful_copy(self.repo_root, repo)
         phases.append(f"copy {time.monotonic() - t0:.1f}s")
         t0 = time.monotonic()
         # the sandbox must BE the repo — a dropped file here would make

@@ -350,6 +350,8 @@ def test_pytest_profile_installs_under_docker(monkeypatch, tmp_path):
     from edgeverdict.config import Config, build_profile
 
     (tmp_path / "pyproject.toml").write_text(
+        "[build-system]\nrequires = [\"setuptools\"]\n"
+        "build-backend = \"setuptools.build_meta\"\n"
         "[project]\nname = \"fixture\"\nversion = \"0\"\n"
         "[project.optional-dependencies]\ntest = [\"pytest\"]\n"
     )
@@ -397,6 +399,8 @@ def test_pytest_profile_reads_dependency_groups(monkeypatch, tmp_path):
     from edgeverdict.config import Config, build_profile
 
     (tmp_path / "pyproject.toml").write_text(
+        "[build-system]\nrequires = [\"setuptools\"]\n"
+        "build-backend = \"setuptools.build_meta\"\n"
         "[project]\nname = \"fixture\"\nversion = \"0\"\n"
         "[dependency-groups]\n"
         "lint = [\"ruff\"]\n"
@@ -513,6 +517,8 @@ def test_host_file_imports_supplement_the_install(monkeypatch, tmp_path):
     from edgeverdict.config import Config, build_profile
 
     (tmp_path / "pyproject.toml").write_text(
+        "[build-system]\nrequires = [\"setuptools\"]\n"
+        "build-backend = \"setuptools.build_meta\"\n"
         "[project]\nname = \"fixture\"\nversion = \"0\"\n"
     )
     (tmp_path / "localmod.py").write_text("x = 1\n")
