@@ -426,33 +426,7 @@ not `/models`.
   N² pairings, most of which do not exist in the schema. The fix and the
   generated regression tests (self-referential, cross-schema,
   non-primary-unique, multi-FK, three-column) are merged into main.
-- [colinhacks/zod#6211](https://github.com/colinhacks/zod/issues/6211): ran
-  the proposed suite against an open fix branch
-  ([#6181](https://github.com/colinhacks/zod/pull/6181)). The run confirmed
-  that fix resolves a crash across 11 shapes and surfaced one residual case
-  involving a `__proto__` path element, where bracket assignment sets the
-  prototype instead of an own key. Verified in plain JavaScript on published
-  zod (all five inherited names crash both `formatError` and
-  `treeifyError`), filed as issue 6211, and fixed in
-  [PR #6212](https://github.com/colinhacks/zod/pull/6212) covering both
-  functions with regression tests, red to green with no regressions.
-- [unjs/ufo#360](https://github.com/unjs/ufo/pull/360): proposed tests caught
-  `withBase`/`withoutBase` treating `/` and `?` as base boundaries but not
-  `#`, so a fragment directly after the base path broke both operations.
-  Reported upstream with a fix and regression tests.
 
-- [python-humanize/humanize](https://github.com/python-humanize/humanize/issues/356): proposed tests for the
-  recent `number.py` changes (the #328 carry fix among them) caught `intword`
-  formatting every value between 10^36 and 10^100 as an enormous decillion
-  count (a 67-digit unit multiplier) and never carrying to "1.0 googol" at
-  the boundary. Reported upstream with two candidate behaviors for the
-  maintainers to choose between; PR offered.
-- [marshmallow-code/marshmallow](https://github.com/marshmallow-code/marshmallow/issues/3005): proposed tests
-  for the recent `fields.py` changes (#2907 among them) caught nested
-  `error_messages` values shared by reference across all instances of a field
-  class and the class default itself, via the constructor's shallow
-  `dict.update` merge: one instance's customization silently rewrites every
-  sibling and all future instances. Reported upstream; PR offered.
 
 The humanize and marshmallow findings are the first from the pytest path:
 the same gate, proposing and executing pytest instead of vitest, against
