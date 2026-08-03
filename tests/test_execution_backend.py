@@ -818,3 +818,70 @@ def test_docker_command_uses_phase_fsize(monkeypatch, tmp_path):
     small = f"fsize={backend.limits.file_size_bytes}:{backend.limits.file_size_bytes}"
     assert big in inst
     assert small in test
+
+
+# --- proposer signature surface (sig EDGEVERDICT_SIG_SURFACE_TESTS_V1) ---
+
+
+def test_signature_surface_names_real_fields_not_invented(tmp_path):
+    """A @dataclass imported one hop from the target must appear with its
+    REAL fields and nothing invented — the posthog #813 case where the
+    proposal wrote FeatureFlag(id=...) but the real fields are
+    key/enabled/variant/reason/metadata, defined in a sibling module."""
+    from edgeverdict.agents.reviewer_agent import signature_surface
+
+    (tmp_path / "types.py").write_text(
+        "from dataclasses import dataclass\n"
+        "from typing import Optional\n\n"
+        "@dataclass(frozen=True)\n"
+        "class Flag:\n"
+        "    key: str\n"
+        "    enabled: bool\n"
+        "    variant: Optional[str]\n"
+    )
+    (tmp_path / "client.py").write_text(
+        "from types import Flag\n\n"  # note: relative-style resolve below
+    )
+    # use an absolute intra-repo import so the resolver maps it
+    (tmp_path / "pkg").mkdir()
+    (tmp_path / "pkg" / "__init__.py").write_text("")
+    (tmp_path / "pkg" / "types.py").write_text(
+        "from dataclasses import dataclass\n"
+        "from typing import Optional\n\n"
+        "@dataclass\n"
+        "class Flag:\n"
+        "    key: str\n"
+        "    enabled: bool\n"
+        "    variant: Optional[str]\n"
+    )
+    (tmp_path / "pkg" / "client.py").write_text(
+        "from pkg.types import Flag\n\n"
+        "def build() -> Flag:\n"
+        "    return Flag('k', True, None)\n"
+    )
+    out = signature_surface(str(tmp_path), "pkg/client.py")
+    assert "Flag(key, enabled, variant)" in out
+    fields = out.split("Flag(")[1].split(")")[0]
+    assert "id" not in fields.split(", ")
+    assert "build()" in out
+
+
+def test_signature_surface_local_function_params(tmp_path):
+    """A method in the target file surfaces its real parameter names, so
+    the proposer stops inventing kwargs like only_evaluate_locally."""
+    from edgeverdict.agents.reviewer_agent import signature_surface
+
+    (tmp_path / "m.py").write_text(
+        "def get_flags(distinct_id, groups=None, person_properties=None):\n"
+        "    return {}\n"
+    )
+    out = signature_surface(str(tmp_path), "m.py")
+    assert "get_flags(distinct_id, groups, person_properties)" in out
+    assert "only_evaluate_locally" not in out
+
+
+def test_signature_surface_non_python_is_empty(tmp_path):
+    from edgeverdict.agents.reviewer_agent import signature_surface
+
+    (tmp_path / "x.ts").write_text("export const y = 1\n")
+    assert signature_surface(str(tmp_path), "x.ts") == ""

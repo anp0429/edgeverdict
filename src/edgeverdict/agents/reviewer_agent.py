@@ -116,7 +116,7 @@ _DECL_RE = re.compile(
 # only when its inputs do.
 _USER_SHAPE = (
     "WHAT THIS PR CHANGED|SOURCE FILE|EXISTING TESTS|IMPORT SURFACE|"
-    "IN SCOPE IN THE HOST TESTS FILE|axis"
+    "REAL SIGNATURES|IN SCOPE IN THE HOST TESTS FILE|axis"
 )
 
 
@@ -519,6 +519,161 @@ def parse_review_plan(data: dict) -> list[ReviewFinding]:
     return findings
 
 
+def _sig_of_class(node) -> str:
+    """One-line constructible surface for a class: explicit __init__
+    parameters if present, else dataclass-style annotated fields (the
+    posthog FeatureFlag case — a @dataclass with no __init__, whose real
+    fields are key/enabled/variant/reason/metadata and NOT `id`)."""
+    for item in node.body:
+        if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef)) \
+                and item.name == "__init__":
+            a = item.args
+            params = [p.arg for p in (list(a.posonlyargs) + list(a.args))
+                      if p.arg != "self"]
+            if a.vararg:
+                params.append("*" + a.vararg.arg)
+            params += [p.arg for p in a.kwonlyargs]
+            if a.kwarg:
+                params.append("**" + a.kwarg.arg)
+            return f"{node.name}({', '.join(params)})"
+    # no __init__: dataclass / annotated fields at class-body scope
+    fields = [b.target.id for b in node.body
+              if isinstance(b, ast.AnnAssign) and isinstance(b.target, ast.Name)
+              and not b.target.id.startswith("_")]
+    if fields:
+        return f"{node.name}({', '.join(fields)})"
+    return node.name + "()"
+
+
+def _sig_of_func(node) -> str:
+    a = node.args
+    params = [p.arg for p in (list(a.posonlyargs) + list(a.args))
+              if p.arg != "self"]
+    if a.vararg:
+        params.append("*" + a.vararg.arg)
+    params += [p.arg for p in a.kwonlyargs]
+    if a.kwarg:
+        params.append("**" + a.kwarg.arg)
+    return f"{node.name}({', '.join(params)})"
+
+
+def _signatures_in_source(src: str) -> tuple[dict, dict]:
+    """(classes, funcs) name -> one-line signature, public top-level only."""
+    classes: dict = {}
+    funcs: dict = {}
+    try:
+        tree = ast.parse(src)
+    except (SyntaxError, ValueError):
+        return classes, funcs
+    for node in tree.body:
+        if isinstance(node, ast.ClassDef) and not node.name.startswith("_"):
+            classes[node.name] = _sig_of_class(node)
+        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) \
+                and not node.name.startswith("_"):
+            funcs[node.name] = _sig_of_func(node)
+    return classes, funcs
+
+
+def _resolve_relative_import(repo_root: str, target_rel: str,
+                             module: str, level: int) -> str | None:
+    """Map an import in the target file to a repo-relative .py path, one
+    hop. Handles `from .types import` / `from pkg.types import` and
+    absolute `from pkg.mod import` within the repo. Returns None when it
+    escapes the repo or the file is absent."""
+    if level:  # relative: resolve against the target's package dir
+        base = os.path.dirname(target_rel)
+        for _ in range(level - 1):
+            base = os.path.dirname(base)
+        rel = os.path.join(base, *module.split(".")) if module else base
+    else:      # absolute: try as a repo-rooted path (drop leading pkg if it
+               # matches the target's top package, e.g. posthog.types)
+        rel = os.path.join(*module.split("."))
+    for cand in (rel + ".py", os.path.join(rel, "__init__.py")):
+        full = os.path.join(repo_root, cand)
+        if os.path.isfile(full) and os.path.abspath(full).startswith(
+                os.path.abspath(repo_root)):
+            return cand
+    return None
+
+
+def signature_surface(repo_root: str, target_rel: str) -> str:
+    """Deterministic prompt DATA: the real constructor/parameter shapes of
+    the classes and functions a test will call, so the proposer stops
+    inventing kwargs. Motivated by posthog-python #813, where proposals
+    wrote FeatureFlag(id=...) (a @dataclass whose real fields are
+    key/enabled/variant/reason/metadata, imported from posthog.types) and
+    get_feature_flags_and_payloads(only_evaluate_locally=...) (a real
+    method with no such parameter) — both died as TypeErrors before
+    executing. Generic Python-shaped, no repo names: the target file's own
+    classes/functions plus a ONE-HOP resolve of the names it imports and
+    actually calls. Facts from the ast, never judgment."""
+    if not target_rel.endswith(".py"):
+        return ""
+    try:
+        with open(os.path.join(repo_root, target_rel),
+                  encoding="utf-8", errors="replace") as fh:
+            src = fh.read()
+        tree = ast.parse(src)
+    except (OSError, SyntaxError, ValueError):
+        return ""
+
+    classes, funcs = _signatures_in_source(src)
+
+    # one-hop: resolve the PUBLIC names the target imports from repo
+    # modules and pull their signatures. A test constructs the target's
+    # API types (return/param types) even when the target file itself only
+    # references them — posthog #813's FeatureFlag is imported into
+    # client.py but never constructed there, yet the test must build one.
+    # Over-inclusion here costs prompt weight, never correctness, since
+    # signatures are DATA the proposer may ignore, not bindings.
+    imported: dict = {}
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.ImportFrom):
+            continue
+        wanted = [a.asname or a.name for a in node.names
+                  if a.name != "*"
+                  and not (a.asname or a.name).startswith("_")
+                  and (a.asname or a.name) not in classes
+                  and (a.asname or a.name) not in funcs]
+        if not wanted:
+            continue
+        dep = _resolve_relative_import(repo_root, target_rel,
+                                       node.module or "", node.level or 0)
+        if not dep:
+            continue
+        try:
+            with open(os.path.join(repo_root, dep),
+                      encoding="utf-8", errors="replace") as fh:
+                dsrc = fh.read()
+        except OSError:
+            continue
+        dclasses, dfuncs = _signatures_in_source(dsrc)
+        for name in wanted:
+            if name in dclasses:
+                imported[name] = dclasses[name]
+            elif name in dfuncs:
+                imported[name] = dfuncs[name]
+        if len(imported) >= 40:
+            break
+
+    local = {**classes, **funcs}
+    if not local and not imported:
+        return ""
+    lines = []
+    if local:
+        lines.append("  in this file: "
+                     + "; ".join(sorted(local[k] for k in local)))
+    if imported:
+        lines.append("  imported and used here: "
+                     + "; ".join(sorted(imported[k] for k in imported)))
+    body = "\n".join(lines)
+    return (
+        "REAL SIGNATURES (construct these with ONLY the parameters shown; "
+        "these are read from the code under test, so do not invent "
+        "constructor keywords or function arguments):\n" + body
+    )
+
+
 class ReviewerAgent:
     def __init__(
         self,
@@ -570,6 +725,7 @@ class ReviewerAgent:
         source = self._read(self.target_path)[: self.max_chars]
         tests = self._read(self.existing_tests_path)[: self.max_chars]
         surface = import_surface(self.repo_root, self.target_path)
+        sigs = signature_surface(self.repo_root, self.target_path)
         scope = host_scope(self.existing_tests_path, tests)
         change_block = (
             f"WHAT THIS PR CHANGED (review THIS against the intent, not the whole file):\n"
@@ -582,6 +738,7 @@ class ReviewerAgent:
             f"SOURCE FILE ({self.target_path}):\n```\n{source}\n```\n\n"
             f"EXISTING TESTS ({self.existing_tests_path}):\n```\n{tests}\n```"
             + (f"\n\n{surface}" if surface else "")
+            + (f"\n\n{sigs}" if sigs else "")
             + (f"\n\n{scope}" if scope else "")
             + (f"\n\n{self._axis_directive}" if self._axis_directive else "")
         )
