@@ -778,3 +778,43 @@ def test_profile_carries_declared_only_fallback(monkeypatch, tmp_path):
     assert prof.install_fallback_cmd is not None
     assert "parameterized" not in prof.install_fallback_cmd
     assert prof.install_fallback_cmd[:4] == ["python", "-m", "pip", "install"]
+
+
+# --- phase-aware fsize (sig EDGEVERDICT_PHASE_FSIZE_TESTS_V1) ---
+
+
+def test_install_gets_generous_fsize_execution_stays_tight(monkeypatch):
+    """Install downloads legitimately large wheels (claude-agent-sdk ships
+    ~85MB) and must not trip the per-file cap that guards runaway TEST
+    writes. Install commands get the ceiling; test commands do not."""
+    from edgeverdict.execution import DockerBackend, DockerLimits
+
+    b = DockerBackend.__new__(DockerBackend)
+    b.limits = DockerLimits()
+    assert b._fsize(["python", "-m", "pip", "install", "-e", "."]) == \
+        b.limits.install_file_size_bytes
+    assert b._fsize(["npx", "-y", "pnpm@9", "install"]) == \
+        b.limits.install_file_size_bytes
+    assert b._fsize(["python", "-m", "pytest", "x.py"]) == \
+        b.limits.file_size_bytes
+    assert b._fsize(["npx", "vitest", "run"]) == b.limits.file_size_bytes
+    assert b.limits.install_file_size_bytes >= 85 * 1024 * 1024
+
+
+def test_docker_command_uses_phase_fsize(monkeypatch, tmp_path):
+    """The built command carries the install ceiling for an install and the
+    tight cap for a test run."""
+    backend = _docker_backend_for_test(monkeypatch)
+    root = tmp_path / "edgeverdict_warm_test"
+    cwd = root / "repo"
+    cwd.mkdir(parents=True)
+    inst = backend._docker_command(
+        ["python", "-m", "pip", "install", "-e", "."],
+        cwd=str(cwd), env={}, name="ev-i")
+    test = backend._docker_command(
+        ["python", "-m", "pytest", "x.py"],
+        cwd=str(cwd), env={}, name="ev-t")
+    big = f"fsize={backend.limits.install_file_size_bytes}:{backend.limits.install_file_size_bytes}"
+    small = f"fsize={backend.limits.file_size_bytes}:{backend.limits.file_size_bytes}"
+    assert big in inst
+    assert small in test

@@ -48,6 +48,11 @@ class DockerLimits:
     pids: int = 256
     nofile: int = 1024
     file_size_bytes: int = 64 * 1024 * 1024
+    # Install writes legitimately large vendored wheels (e.g.
+    # claude-agent-sdk ships an ~85MB binary); the tight per-file cap
+    # exists to bound runaway TEST writes, not install downloads, so the
+    # install phase gets a generous ceiling while execution stays tight.
+    install_file_size_bytes: int = 512 * 1024 * 1024
     tmpfs_size: str = "512m"
     max_output_bytes: int = 2 * 1024 * 1024
 
@@ -413,6 +418,15 @@ class DockerBackend:
                 f"{self.network_policy!r}; use only with repositories you trust"
             )
 
+    def _fsize(self, args: Sequence[str]) -> int:
+        """Per-file byte cap. Install commands download vendored wheels
+        that legitimately exceed the tight execution cap, so they get the
+        higher install ceiling; test runs keep the tight bound that guards
+        against runaway writes. Same install/execute split as _network."""
+        if _looks_like_install(args):
+            return self.limits.install_file_size_bytes
+        return self.limits.file_size_bytes
+
     def _network(self, args: Sequence[str]) -> str:
         if self.network_policy == "all":
             return "bridge"
@@ -455,7 +469,7 @@ class DockerBackend:
             "--ulimit",
             f"nofile={self.limits.nofile}:{self.limits.nofile}",
             "--ulimit",
-            f"fsize={self.limits.file_size_bytes}:{self.limits.file_size_bytes}",
+            f"fsize={self._fsize(args)}:{self._fsize(args)}",
             "--user",
             f"{uid}:{gid}",
             "--tmpfs",
