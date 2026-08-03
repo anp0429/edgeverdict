@@ -427,11 +427,6 @@ not `/models`.
   generated regression tests (self-referential, cross-schema,
   non-primary-unique, multi-FK, three-column) are merged into main.
 
-
-The humanize and marshmallow findings are the first from the pytest path:
-the same gate, proposing and executing pytest instead of vitest, against
-repositories it had never seen.
-
 Every finding above was produced by executing tests, and every one is
 reproducible by hand.
 
