@@ -42,6 +42,21 @@ class ReviewFinding:
     # (short-needle substrings, format opinions). Advisory — NEVER changes
     # status.
     lint_note: str = ""
+    # deterministic confidence tier (classify_gap_confidence) — "high" for a
+    # gap whose failure is objective wrongness (an exception RAISED, a crash,
+    # a type error: no design opinion can make it correct), "low" for a value
+    # mismatch that may be the proposer disagreeing with an intended design
+    # choice. Advisory — NEVER changes status; the gate does not lie about
+    # whether the test failed, only annotates how much a human should trust
+    # that the failure represents a real bug.
+    confidence: str = ""               # "" | "high" | "low"
+    confidence_reason: str = ""
+    # static blast radius (edgeverdict.blast) — module-level reach of the
+    # target file, computed from the repo's own import edges, no model, no
+    # tokens. Impact axis of the triage matrix. Advisory — NEVER changes
+    # status.
+    blast: str = ""                    # "" | "wide" | "moderate" | "narrow"
+    blast_note: str = ""
     # set when a broken proposal was repaired (one bounded round) and
     # re-executed; its status is whatever the SECOND run earned
     repaired: bool = False
@@ -101,6 +116,166 @@ def flag_systematic_artifacts(findings: list[ReviewFinding],
             "cause before treating any of them as real."
         )
     return warnings
+
+
+# Failure signatures that mean the test RAISED rather than asserted a value.
+# An exception reaching the top is objective wrongness: no design opinion
+# renders a crash correct. Substring match on the first observed line is
+# deliberate — pytest prints "SomeError" / "raised" / a traceback header for
+# these, and a plain "AssertionError: x != y" for a value mismatch.
+_OBJECTIVE_FAILURE_MARKERS = (
+    "Error:",          # TypeError:, ValueError:, KeyError:, custom *Error:
+    "Exception",
+    "Traceback",
+    "not raised",      # "InconclusiveMatchError not raised" — expected to
+                       # raise and didn't: a contract break, not a value opinion
+    "DID NOT RAISE",   # pytest.raises' own wording for the same thing
+    "unexpectedly raised",
+    "segmentation",
+    "RecursionError",
+    "hang",
+)
+
+# "AssertionError:" ends in "Error:" and would wrongly match the objective set;
+# a bare assertion failure is the CANONICAL judgment signal. Exclude it first.
+_ASSERTION_PREFIXES = ("AssertionError", "assert ", "Failed: assert")
+
+# vitest/jest phrase value mismatches as MATCHER failures, not "x != y", and
+# they frequently lead with "Error:" or "AssertionError:" — so the objective
+# substring set would wrongly claim them as crashes. These markers, ANYWHERE
+# in the message, mean "a matcher compared two values and they differed" =
+# judgment, same class as pytest's "AssertionError: a != b". A genuine thrown
+# error in vitest has a stack/type but none of these matcher tokens.
+_JS_MATCHER_MARKERS = (
+    "expect(",          # expect(received).toBe(...)
+    " to be ",          # "expected 3 to be 4"
+    " to equal ",
+    " to deeply equal ",
+    " to match ",
+    " to contain ",
+    ".toBe", ".toEqual", ".toMatch", ".toContain", ".toThrow",
+    "expected ", "received ",
+)
+
+# A bare value-mismatch assertion: "AssertionError: a != b", "assert x == y".
+# This is where design-intent disagreements live (dateparser YDM 05->2005,
+# posthog None->False): the code did something coherent, the proposer wanted
+# something else. Not wrong on its face — needs a human or the code graph.
+_JUDGMENT_FAILURE_MARKERS = (
+    "AssertionError",
+    "assert ",
+    "!=",
+    "==",
+    " is not ",
+    " is None",
+)
+
+
+def classify_gap_confidence(findings: list[ReviewFinding]) -> None:
+    """Deterministic confidence tiering for confirmed gaps. Sets each gap's
+    `confidence` to "high" or "low" and a one-line reason. NEVER changes
+    status — the test executed and failed; this only annotates how much a
+    human should trust that the failure is a real bug versus a disagreement
+    with an intended design choice.
+
+    Learned across seven hand-verified false positives (marshmallow #3005,
+    humanize #356, deepagents #5241, two posthog-python, two dateparser):
+    EVERY one was a value-mismatch assertion where the proposer invented a
+    spec the library never promised — None should raise, YDM's leading number
+    is the day, arrays evaluate element-wise. And on the one clean pure-logic
+    run (tenacity cyclic __cause__), the proposer produced ZERO gaps: given a
+    single correct answer, it does not manufacture disagreement. Meanwhile the
+    two REAL finds (supabase #317 cartesian product, zod #6212 __proto__
+    crash) were objective wrongness — a wrong value produced without opinion,
+    and a crash. So the failure SHAPE is the signal: raised/crashed = high
+    (objective), value-mismatch = low (possible design disagreement).
+
+    Three inputs, all already on the finding, no model in the loop:
+      - the failure text (`observed`) — raised vs asserted;
+      - the advisory auditor (`audit`) — likely_false_positive pulls down;
+      - the brittleness lint and artifact note — either pulls down.
+    High requires objective failure AND no countervailing advisory flag; every
+    other confirmed gap is low, because the default posture toward a value
+    mismatch is distrust until a human (or, later, the code graph) clears it.
+    """
+    for f in findings:
+        if f.status != "confirmed_gap":
+            continue
+        first = (f.observed or "").strip().splitlines()
+        line = first[0] if first else ""
+
+        # A plain assertion failure is judgment even though "AssertionError"
+        # ends in "Error:" — check it FIRST so the objective substring set
+        # can't capture it. "DID NOT RAISE" / "not raised" are the exception:
+        # a missing-raise is an objective contract break, not a value opinion.
+        is_assertion = line.startswith(_ASSERTION_PREFIXES)
+        # a vitest/jest matcher failure is a value mismatch even though it may
+        # say "Error:" — check the whole first line, not just the prefix.
+        is_js_matcher = any(m in line for m in _JS_MATCHER_MARKERS)
+        # MISSING-RAISE ("X not raised" / "DID NOT RAISE" / failed .toThrow)
+        # is NOT unconditionally objective. Learned the hard way on the
+        # posthog None case: the classifier tiered "InconclusiveMatchError
+        # not raised" HIGH/file-ready, and hand-verification had already
+        # proven it a false positive — the raise expectation was itself the
+        # proposer's invented contract (the code returns False for None BY
+        # DESIGN, NONE_VALUES_ALLOWED_OPERATORS = ["is_not"]). A missing
+        # raise is only objective when the change's INTENT promised a raise,
+        # which a text heuristic cannot see. Default posture = distrust:
+        # tier LOW with its own reason; the behavior_surface (Part C) or a
+        # human clears it. Genuinely RAISED exceptions stay high.
+        js_missing_throw = ("toThrow" in line or " to throw " in line) and (
+            "not" in line.lower() or "did not" in line.lower()
+            or "no error" in line.lower()
+        )
+        missing_raise = (
+            "not raised" in line or "DID NOT RAISE" in line or js_missing_throw
+        )
+        raised = (
+            (not missing_raise)
+            and (not is_assertion) and (not is_js_matcher)
+            and any(m in line for m in _OBJECTIVE_FAILURE_MARKERS)
+        )
+
+        flagged = (
+            f.audit == "likely_false_positive"
+            or bool(f.artifact_note)
+            or bool(f.lint_note)
+        )
+
+        if missing_raise:
+            f.confidence = "low"
+            f.confidence_reason = (
+                "missing-raise: the raise expectation may itself be the "
+                "proposer's invented contract — objective only if the "
+                "change's intent promises a raise; verify against intent "
+                "and source"
+            )
+            if f.audit == "likely_false_positive":
+                f.confidence_reason += "; auditor: likely false positive"
+            continue
+        if raised and not flagged:
+            f.confidence = "high"
+            f.confidence_reason = (
+                "objective failure (exception/crash) with no false-positive "
+                "flag — no design choice makes this correct"
+            )
+        elif raised and flagged:
+            f.confidence = "low"
+            f.confidence_reason = (
+                "objective failure, but an advisory layer flagged it "
+                "(auditor/artifact/lint) — verify before trusting"
+            )
+        else:
+            f.confidence = "low"
+            bits = ["value-mismatch assertion — may be a design-intent "
+                    "disagreement, not a bug"]
+            if f.audit == "likely_false_positive":
+                bits.append("auditor: likely false positive")
+            if f.artifact_note:
+                bits.append("shared-cause artifact")
+            if f.lint_note:
+                bits.append("brittle assertion shape")
+            f.confidence_reason = "; ".join(bits)
 
 
 _STATUS_LABEL = {
@@ -168,6 +343,27 @@ def render_review_html(run: ReviewRun, path: str) -> str:
                if f.covered_by_existing else
                "not covered by existing tests" + (f" — {html.escape(f.coverage_note)}" if f.coverage_note else ""))
         extra = ""
+        if f.status == "confirmed_gap" and f.blast:
+            _bc = {"wide": "#e0c060", "moderate": "#c9c8c2",
+                   "narrow": "#76756e"}.get(f.blast, "#76756e")
+            extra += (
+                f'<div class="audit" style="border-color:{_bc}">'
+                f'<b style="color:{_bc}">blast: {f.blast}</b>'
+                + (f' — {html.escape(f.blast_note)}' if f.blast_note else "")
+                + '</div>'
+            )
+        if f.status == "confirmed_gap" and f.confidence:
+            _cc = "#f09595" if f.confidence == "low" else "#5dcaa5"
+            _clabel = ("LOW confidence — possible design-intent disagreement, "
+                       "verify against source"
+                       if f.confidence == "low"
+                       else "HIGH confidence — objective failure (exception/crash)")
+            extra += (
+                f'<div class="audit" style="border-color:{_cc}">'
+                f'<b style="color:{_cc}">{_clabel}</b>'
+                + (f' — {html.escape(f.confidence_reason)}' if f.confidence_reason else "")
+                + '</div>'
+            )
         if f.observed:
             extra += f'<div class="observed"><b>Observed:</b> {html.escape(f.observed)}</div>'
         if f.fix_status:

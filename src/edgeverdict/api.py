@@ -44,7 +44,14 @@ from .config import (
 from .fingerprint import verdict_summary
 from .proposal_cache import propose_or_cached
 from .providers import endpoint_label
-from .review import ReviewFinding, ReviewRun, flag_systematic_artifacts, render_review_html
+from .blast import compute_blast, triage
+from .review import (
+    ReviewFinding,
+    ReviewRun,
+    classify_gap_confidence,
+    flag_systematic_artifacts,
+    render_review_html,
+)
 from .verifiers.finding_verifier import FindingVerifier
 from .verifiers.harness import harness_for_profile, harness_for_target
 
@@ -426,6 +433,36 @@ def run_review(request: ReviewRequest, log=print) -> ReviewResult:
             log(f"  {w}")
         log()
 
+    # Deterministic confidence tiering: objective failures (raised/crashed)
+    # are high; value-mismatch assertions are low (possible design-intent
+    # disagreement). Advisory — status is untouched. Runs after the auditor
+    # and artifact pass so their flags feed the tier.
+    classify_gap_confidence(run.findings)
+
+    # Static blast radius per target file: one walk of the repo's import
+    # edges (no model, no tokens), stamped on every finding of that file.
+    _blast_cache: dict[str, tuple[str, str]] = {}
+    for f in run.findings:
+        tgt = f.source_file or (pairs[0][0] if pairs else "")
+        if not tgt:
+            continue
+        if tgt not in _blast_cache:
+            try:
+                _blast_cache[tgt] = compute_blast(repo, tgt)
+            except Exception as exc:  # noqa: BLE001 — advisory must not kill a run
+                _blast_cache[tgt] = ("", f"blast radius unavailable: {exc}")
+        f.blast, f.blast_note = _blast_cache[tgt]
+    for tgt, (tier, note) in _blast_cache.items():
+        if tier:
+            log(f"  [blast] {tgt}: {tier} — {note}")
+    _low = [f for f in run.findings
+            if f.status == "confirmed_gap" and f.confidence == "low"]
+    if _low:
+        log(f"\n{len(_low)} of the confirmed gap(s) are LOW confidence "
+            "(value-mismatch, possible design-intent disagreement) — "
+            "hand-verify against the source before filing. High-confidence "
+            "gaps are objective failures (exception/crash).")
+
     from collections import Counter
 
     def _cause(f):
@@ -437,7 +474,15 @@ def run_review(request: ReviewRequest, log=print) -> ReviewResult:
     causes_shown: set[str] = set()
     for f in run.findings:
         tag = f"{f.source_file}: " if len(pairs) > 1 and f.source_file else ""
-        log(f"  [{f.status:14}] {tag}{f.behavior[:60]}")
+        conf = ""
+        if f.status == "confirmed_gap" and f.confidence:
+            conf = f" ({f.confidence} confidence"
+            if f.blast:
+                conf += f", {f.blast} blast -> {triage(f.confidence, f.blast)}"
+            conf += ")"
+        log(f"  [{f.status:14}] {tag}{f.behavior[:60]}{conf}")
+        if f.status == "confirmed_gap" and f.confidence == "low" and f.confidence_reason:
+            log(f"       ~ {f.confidence_reason}")
         if f.observed and f.status not in ("handled", "skipped_covered"):
             c = _cause(f)
             if f.status == "broken_test" and broken_causes.get(c, 0) > 1:
@@ -560,6 +605,16 @@ def _write_json_out(path, run, *, repo, base, head, pairs, board) -> None:
                 "audit": f.audit or None,
                 "audit_reason": f.audit_reason or None,
                 "audit_evidence": f.audit_evidence or None,
+                # deterministic confidence tier — null unless a confirmed_gap.
+                # Additive and nullable, schema_version stays 1.
+                "confidence": f.confidence or None,
+                "confidence_reason": f.confidence_reason or None,
+                # static blast radius + derived triage — nullable, additive.
+                "blast": f.blast or None,
+                "blast_note": f.blast_note or None,
+                "triage": (triage(f.confidence, f.blast)
+                           if f.status == "confirmed_gap" and f.confidence
+                           and f.blast else None),
             }
             for f in run.findings
         ],
