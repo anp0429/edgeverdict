@@ -116,7 +116,7 @@ _DECL_RE = re.compile(
 # only when its inputs do.
 _USER_SHAPE = (
     "WHAT THIS PR CHANGED|SOURCE FILE|EXISTING TESTS|IMPORT SURFACE|"
-    "REAL SIGNATURES|IN SCOPE IN THE HOST TESTS FILE|axis"
+    "REAL SIGNATURES|VISIBLE BEHAVIOR|IN SCOPE IN THE HOST TESTS FILE|axis"
 )
 
 
@@ -674,6 +674,297 @@ def signature_surface(repo_root: str, target_rel: str) -> str:
     )
 
 
+def _changed_ranges(change: str) -> "list[tuple[int, int]] | None":
+    """Line ranges the diff touches on the NEW side, from @@ hunk headers.
+    None when there is no parseable diff (whole-file fallback). Lets
+    behavior_surface scope to the changed function instead of the whole
+    file, so a guard-heavy neighbor doesn't crowd the real helpers out of
+    the cap."""
+    ranges: list = []
+    for m in re.finditer(r"@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@", change or ""):
+        start = int(m.group(1))
+        count = int(m.group(2)) if m.group(2) else 1
+        if count > 0:
+            ranges.append((start, start + count - 1))
+    return ranges or None
+
+
+def _guard_chain(fn: "ast.FunctionDef | ast.AsyncFunctionDef",
+                 src: str) -> list[str]:
+    """The leading early-exit statements of a function: `if cond:
+    return/raise/continue` chains before the main body. These are the
+    code's own visible decisions — the posthog None case lived in exactly
+    such a guard (`if operator not in NONE_VALUES_ALLOWED_OPERATORS and
+    override_value is None: return False`) and the proposer, unable to see
+    it, invented a raise instead."""
+    out: list[str] = []
+    # real functions do a little setup (assignments) before their guards;
+    # skip leading simple assignments so we don't stop at the first line.
+    body = list(fn.body)
+    i = 0
+    while i < len(body) and isinstance(body[i], (ast.Assign, ast.AnnAssign,
+                                                 ast.Expr)):
+        i += 1
+    # collect the run of early-exit ifs, tolerating interleaved assignments
+    # (guard, extract, guard, ... is common). Stop at a compound body.
+    while i < len(body):
+        stmt = body[i]
+        if isinstance(stmt, (ast.Assign, ast.AnnAssign)):
+            i += 1
+            continue
+        if not isinstance(stmt, ast.If):
+            break
+        exits = all(isinstance(x, (ast.Return, ast.Raise, ast.Continue))
+                    for x in stmt.body) and len(stmt.body) <= 2
+        if not exits or stmt.orelse:
+            break
+        seg = ast.get_source_segment(src, stmt)
+        if seg and len(seg) <= 400:
+            out.append(seg)
+        i += 1
+        if len(out) >= 12:   # bound: a dozen guards is plenty of context
+            break
+    return out
+
+
+def behavior_surface(repo_root: str, target_rel: str,
+                     changed_line_ranges: "list[tuple[int, int]] | None" = None,
+                     cap_chars: int = 9000) -> str:
+    """Deterministic prompt DATA: the code's own VISIBLE decisions —
+    module constants, guard clauses, and one-hop helper bodies — so the
+    proposer stops inventing specs that the shown lines already contradict.
+
+    Motivated by every hand-verified judgment false positive to date:
+    posthog's None case (the guard + NONE_VALUES_ALLOWED_OPERATORS =
+    ["is_not"] were in the file), posthog's array case (str_istartswith,
+    one hop away, just stringifies), dateparser's resolve_date_order (a
+    pure lookup table) and YDM ordering (derived from the visible chart).
+    On the one pure-logic run (tenacity) the proposer invented nothing —
+    given visible behavior, disagreement mostly cannot be written.
+
+    Facts from the ast, never judgment. Advisory DATA the proposer may
+    ignore; worst case is prompt weight. NEVER replaces execution — this
+    shapes what gets PROPOSED; verdicts are still earned by running.
+    Failure posture: any trouble -> "" (a surface must never kill a run).
+    Cap drop order: helpers first, then guards, never constants."""
+    if not target_rel.endswith(".py"):
+        return ""
+    try:
+        with open(os.path.join(repo_root, target_rel),
+                  encoding="utf-8", errors="replace") as fh:
+            src = fh.read()
+        tree = ast.parse(src)
+    except (OSError, SyntaxError, ValueError):
+        return ""
+
+    def _in_ranges(node) -> bool:
+        if not changed_line_ranges:
+            return True
+        lo = getattr(node, "lineno", None)
+        hi = getattr(node, "end_lineno", None) or lo
+        if lo is None or hi is None:
+            return False
+        return any(not (hi < a or lo > b) for a, b in changed_line_ranges)
+
+    # 1) module constants: top-level literal assignments, verbatim.
+    constants: list[str] = []
+    for cnode in tree.body:
+        value: "ast.expr | None"
+        if isinstance(cnode, ast.Assign) and cnode.targets:
+            value = cnode.value
+        elif isinstance(cnode, ast.AnnAssign):
+            value = cnode.value
+        else:
+            continue
+        if value is None:
+            continue
+        if isinstance(value, (ast.Constant, ast.List, ast.Tuple, ast.Set,
+                              ast.Dict)):
+            seg = ast.get_source_segment(src, cnode)
+            if seg and len(seg) <= 300:
+                constants.append(seg)
+
+    # 2) guard clauses of changed (or all, when ranges unknown) functions.
+    guards: list[str] = []
+    # 3) names CALLED inside those functions, for one-hop helper bodies.
+    called: set = set()
+    attr_calls: set = set()
+    funcs = [n for n in ast.walk(tree)
+             if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))]
+    for fn in funcs:
+        if fn.name.startswith("__") or not _in_ranges(fn):
+            continue
+        for g in _guard_chain(fn, src):
+            guards.append(f"{fn.name}: {g}")
+        for node in ast.walk(fn):
+            if isinstance(node, ast.Call):
+                if isinstance(node.func, ast.Name):
+                    called.add(node.func.id)
+                elif isinstance(node.func, ast.Attribute) and \
+                        isinstance(node.func.value, ast.Name):
+                    # utils.str_istartswith(...) -> record (module, attr) so
+                    # we can resolve the module one hop and pull the func.
+                    called.add(node.func.attr)
+                    attr_calls.add((node.func.value.id, node.func.attr))
+
+    # resolve helpers: same-file defs, then intra-repo imports (one hop).
+    helpers: list[str] = []
+    local_defs = {f.name: f for f in funcs}
+    seen: set = set()
+    for name in sorted(called):
+        if name in local_defs and name not in seen:
+            seen.add(name)
+            fn = local_defs[name]
+            seg = ast.get_source_segment(src, fn) or ""
+            body_lines = seg.splitlines()
+            if 0 < len(body_lines) <= 30:
+                helpers.append(seg)
+            elif body_lines:
+                head = body_lines[0]
+                first_guards = _guard_chain(fn, src)
+                helpers.append("\n".join([head, *first_guards[:1]]))
+    # imported helpers, one hop
+    imported_from: dict = {}
+    for inode in ast.walk(tree):
+        if isinstance(inode, ast.ImportFrom):
+            dep = _resolve_relative_import(repo_root, target_rel,
+                                           inode.module or "", inode.level or 0)
+            if dep:
+                for a in inode.names:
+                    imported_from[a.asname or a.name] = dep
+        elif isinstance(inode, ast.Import):
+            for a in inode.names:
+                dep = _resolve_relative_import(repo_root, target_rel,
+                                               a.name, 0)
+                if dep:
+                    imported_from[(a.asname or a.name).split(".")[0]] = dep
+    # module aliases: `from pkg import utils` / `import pkg.utils as u`,
+    # so module.func() attribute calls resolve one hop.
+    module_alias: dict = {}
+    for mnode in ast.walk(tree):
+        if isinstance(mnode, ast.ImportFrom):
+            for a in mnode.names:
+                sub = (mnode.module or "") + ("." if mnode.module else "") + a.name
+                dep = _resolve_relative_import(repo_root, target_rel, sub,
+                                               mnode.level or 0)
+                if dep:
+                    module_alias[a.asname or a.name] = dep
+        elif isinstance(mnode, ast.Import):
+            for a in mnode.names:
+                dep = _resolve_relative_import(repo_root, target_rel,
+                                               a.name, 0)
+                if dep:
+                    module_alias[(a.asname or a.name).split(".")[0]] = dep
+
+    dep_cache: dict = {}
+
+    # resolve module.func() attribute calls (utils.str_istartswith) one hop.
+    for mod, attr in sorted(attr_calls):
+        if attr in seen or mod not in module_alias:
+            continue
+        dep = module_alias[mod]
+        if dep not in dep_cache:
+            try:
+                with open(os.path.join(repo_root, dep),
+                          encoding="utf-8", errors="replace") as fh:
+                    dsrc = fh.read()
+                dep_cache[dep] = (dsrc, ast.parse(dsrc))
+            except (OSError, SyntaxError, ValueError):
+                dep_cache[dep] = None
+        if not dep_cache[dep]:
+            continue
+        dsrc, dtree = dep_cache[dep]
+        for dfn in dtree.body:
+            if isinstance(dfn, (ast.FunctionDef, ast.AsyncFunctionDef)) \
+                    and dfn.name == attr:
+                seen.add(attr)
+                seg = ast.get_source_segment(dsrc, dfn) or ""
+                if 0 < len(seg.splitlines()) <= 30:
+                    helpers.append(f"# from {dep}\n{seg}")
+                elif seg:
+                    helpers.append(f"# from {dep}\n" + "\n".join(
+                        [seg.splitlines()[0], *_guard_chain(dfn, dsrc)[:1]]))
+                break
+
+    for name in sorted(called):
+        if name in seen or name not in imported_from:
+            continue
+        dep = imported_from[name]
+        if dep not in dep_cache:
+            try:
+                with open(os.path.join(repo_root, dep),
+                          encoding="utf-8", errors="replace") as fh:
+                    dsrc = fh.read()
+                dep_cache[dep] = (dsrc, ast.parse(dsrc))
+            except (OSError, SyntaxError, ValueError):
+                dep_cache[dep] = None
+        if not dep_cache[dep]:
+            continue
+        dsrc, dtree = dep_cache[dep]
+        for fn in dtree.body:
+            if isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef))                     and fn.name == name:
+                seen.add(name)
+                seg = ast.get_source_segment(dsrc, fn) or ""
+                body_lines = seg.splitlines()
+                if 0 < len(body_lines) <= 30:
+                    helpers.append(f"# from {dep}\n{seg}")
+                elif body_lines:
+                    helpers.append(f"# from {dep}\n" + "\n".join(
+                        [body_lines[0], *_guard_chain(fn, dsrc)[:1]]))
+                break
+
+    # imported helpers may ALSO shadow: resolve module-attribute calls where
+    # the module itself was imported (utils.str_istartswith) — handled above
+    # by attribute-name matching against each dep's top-level functions.
+    for name in sorted(called):
+        if name in seen:
+            continue
+        for dep, cached in dep_cache.items():
+            if not cached:
+                continue
+            dsrc, dtree = cached
+            for fn in dtree.body:
+                if isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef))                         and fn.name == name:
+                    seen.add(name)
+                    seg = ast.get_source_segment(dsrc, fn) or ""
+                    if 0 < len(seg.splitlines()) <= 30:
+                        helpers.append(f"# from {dep}\n{seg}")
+                    break
+            if name in seen:
+                break
+
+    if not constants and not guards and not helpers:
+        return ""
+
+    def _render(cs, gs, hs) -> str:
+        parts = []
+        if cs:
+            parts.append("module constants:\n" + "\n".join(cs))
+        if gs:
+            parts.append("guard clauses (early exits, verbatim):\n"
+                         + "\n".join(gs))
+        if hs:
+            parts.append("helpers called here (bodies, one hop):\n"
+                         + "\n\n".join(hs))
+        body = "\n\n".join(parts)
+        return (
+            "VISIBLE BEHAVIOR (the code already decides these cases — do "
+            "not propose a behavior that a line shown here contradicts; if "
+            "you believe a shown decision is itself wrong, mark that "
+            "proposal as a design question, not a gap):\n" + body
+        )
+
+    # cap: drop helpers first, then guards, never constants.
+    out = _render(constants, guards, helpers)
+    while len(out) > cap_chars and helpers:
+        helpers.pop()
+        out = _render(constants, guards, helpers)
+    while len(out) > cap_chars and guards:
+        guards.pop()
+        out = _render(constants, guards, helpers)
+    return out if len(out) <= cap_chars else out[:cap_chars]
+
+
 class ReviewerAgent:
     def __init__(
         self,
@@ -726,6 +1017,8 @@ class ReviewerAgent:
         tests = self._read(self.existing_tests_path)[: self.max_chars]
         surface = import_surface(self.repo_root, self.target_path)
         sigs = signature_surface(self.repo_root, self.target_path)
+        behavior = behavior_surface(self.repo_root, self.target_path,
+                                    _changed_ranges(change))
         scope = host_scope(self.existing_tests_path, tests)
         change_block = (
             f"WHAT THIS PR CHANGED (review THIS against the intent, not the whole file):\n"
@@ -739,6 +1032,7 @@ class ReviewerAgent:
             f"EXISTING TESTS ({self.existing_tests_path}):\n```\n{tests}\n```"
             + (f"\n\n{surface}" if surface else "")
             + (f"\n\n{sigs}" if sigs else "")
+            + (f"\n\n{behavior}" if behavior else "")
             + (f"\n\n{scope}" if scope else "")
             + (f"\n\n{self._axis_directive}" if self._axis_directive else "")
         )

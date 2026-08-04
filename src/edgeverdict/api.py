@@ -44,7 +44,7 @@ from .config import (
 from .fingerprint import verdict_summary
 from .proposal_cache import propose_or_cached
 from .providers import endpoint_label
-from .blast import compute_blast, triage
+from .blast import compute_blast, compute_blast_detail, triage
 from .review import (
     ReviewFinding,
     ReviewRun,
@@ -342,65 +342,79 @@ def run_review(request: ReviewRequest, log=print) -> ReviewResult:
             unreviewed.append(tgt)
             continue
         sub = ReviewRun(intent=intent, target=tgt, findings=findings)
+        # reuse_warm: the repair round below re-enters this SAME verifier.
+        # Without reuse the warm base is torn down after the main run and
+        # the repair rebuilds it from scratch — a SECOND full install of a
+        # possibly-flaky dependency tree (learned on posthog-python: the
+        # main install succeeds, the repair's rebuild hits the build-
+        # isolation wall on a fresh dice-roll and env-fails the whole run,
+        # discarding real main-run verdicts). One install per run, not two:
+        # persist the base across main+repair, close it explicitly after.
         verifier = FindingVerifier(repo, pair_profile, tests_file=tst_path,
-                                   timeout=req.timeout,
+                                   timeout=req.timeout, reuse_warm=True,
                                    project_dir=pair_project_dir, log=log,
                                    harness=harness_for_profile(pair_profile))
-        verifier.run(sub)
-        if not req.no_repair:
-            # ONE bounded repair round: a broken proposal is the
-            # proposer's failure and a lost attempt — feed it the exact
-            # error and the target's real import surface, once. Repaired
-            # code re-enters the SAME verifier and earns its status by
-            # execution; a proposal that breaks twice stays broken.
-            broken = [f for f in sub.findings
-                      if f.status == "broken_test" and f.test_code]
-            if broken:
-                surface = import_surface(repo, tgt)
-                repairer = TestRepairer(model=cfg.reviewer_model, log=log)
-                repairer.base_url = provider_base
-                to_rerun: list[ReviewFinding] = []
-                for f in broken[:MAX_REPAIRS]:
-                    code = repairer.repair(f, surface)
-                    if code:
-                        f.test_code = code
-                        f.status = "pending"
-                        f.repaired = True
-                        to_rerun.append(f)
-                if to_rerun:
-                    log(f"  repairing {len(to_rerun)}/{len(broken)} broken "
-                        "proposal(s) (one round; statuses re-earned by "
-                        "execution)")
-                    verifier.run(ReviewRun(intent=intent, target=tgt,
-                                           findings=to_rerun))
-                    fixed = sum(1 for f in to_rerun
-                                if f.status != "broken_test")
-                    log(f"  [repair] {fixed}/{len(to_rerun)} repaired "
-                        "proposal(s) now reach a verdict")
-        for f in sub.findings:
-            # deterministic brittleness lint: free, always on, advisory
-            if f.status == "confirmed_gap" and f.test_code:
-                lint = lint_test(f.test_code)
-                if lint:
-                    f.lint_note = "; ".join(lint)
-                    more = f" (+{len(lint) - 1} more)" if len(lint) > 1 else ""
-                    log(f"  [lint] brittle assertion in "
-                        f"'{f.behavior[:48]}': {lint[0]}{more}")
-        if auditor is not None:
-            gap_count = sum(1 for f in sub.findings if f.status == "confirmed_gap")
-            if gap_count:
-                log(f"  auditing {gap_count} confirmed gap(s) with "
-                    f"{auditor.model} (advisory — verdicts unchanged)…")
-                auditor.audit_all(src, sub.findings)
-        run.findings.extend(sub.findings)
-        # env_error lives on the per-file sub-run; merging only findings threw
-        # it away, so the banner never rendered anywhere and "see banner"
-        # pointed at nothing. Carry it up, tagged per file in multi-target runs.
-        if sub.env_error:
-            tag = f"{tgt}: " if len(pairs) > 1 else ""
-            run.env_error = (
-                (run.env_error + "\n" if run.env_error else "") + tag + sub.env_error
-            )
+        try:
+            verifier.run(sub)
+            if not req.no_repair:
+                # ONE bounded repair round: a broken proposal is the
+                # proposer's failure and a lost attempt — feed it the exact
+                # error and the target's real import surface, once. Repaired
+                # code re-enters the SAME verifier and earns its status by
+                # execution; a proposal that breaks twice stays broken.
+                broken = [f for f in sub.findings
+                          if f.status == "broken_test" and f.test_code]
+                if broken:
+                    surface = import_surface(repo, tgt)
+                    repairer = TestRepairer(model=cfg.reviewer_model, log=log)
+                    repairer.base_url = provider_base
+                    to_rerun: list[ReviewFinding] = []
+                    for f in broken[:MAX_REPAIRS]:
+                        code = repairer.repair(f, surface)
+                        if code:
+                            f.test_code = code
+                            f.status = "pending"
+                            f.repaired = True
+                            to_rerun.append(f)
+                    if to_rerun:
+                        log(f"  repairing {len(to_rerun)}/{len(broken)} broken "
+                            "proposal(s) (one round; statuses re-earned by "
+                            "execution)")
+                        verifier.run(ReviewRun(intent=intent, target=tgt,
+                                               findings=to_rerun))
+                        fixed = sum(1 for f in to_rerun
+                                    if f.status != "broken_test")
+                        log(f"  [repair] {fixed}/{len(to_rerun)} repaired "
+                            "proposal(s) now reach a verdict")
+            for f in sub.findings:
+                # deterministic brittleness lint: free, always on, advisory
+                if f.status == "confirmed_gap" and f.test_code:
+                    lint = lint_test(f.test_code)
+                    if lint:
+                        f.lint_note = "; ".join(lint)
+                        more = f" (+{len(lint) - 1} more)" if len(lint) > 1 else ""
+                        log(f"  [lint] brittle assertion in "
+                            f"'{f.behavior[:48]}': {lint[0]}{more}")
+            if auditor is not None:
+                gap_count = sum(1 for f in sub.findings if f.status == "confirmed_gap")
+                if gap_count:
+                    log(f"  auditing {gap_count} confirmed gap(s) with "
+                        f"{auditor.model} (advisory — verdicts unchanged)…")
+                    auditor.audit_all(src, sub.findings)
+            run.findings.extend(sub.findings)
+            # env_error lives on the per-file sub-run; merging only findings threw
+            # it away, so the banner never rendered anywhere and "see banner"
+            # pointed at nothing. Carry it up, tagged per file in multi-target runs.
+            if sub.env_error:
+                tag = f"{tgt}: " if len(pairs) > 1 else ""
+                run.env_error = (
+                    (run.env_error + "\n" if run.env_error else "") + tag + sub.env_error
+                )
+        finally:
+            # one warm base per target, reused across main+repair, released
+            # here — reuse_warm keeps _ensure_warm from tearing it down after
+            # each run() so the repair round doesn't reinstall.
+            verifier.close()
 
     if not run.findings:
         # every file failed to produce proposals: the original hard stop.
@@ -441,20 +455,28 @@ def run_review(request: ReviewRequest, log=print) -> ReviewResult:
 
     # Static blast radius per target file: one walk of the repo's import
     # edges (no model, no tokens), stamped on every finding of that file.
-    _blast_cache: dict[str, tuple[str, str]] = {}
+    # compute_blast_detail returns the importer LISTS (not just tier/note)
+    # so the review board can render the blast pane; f.blast/f.blast_note
+    # stay exactly as before (detail.tier/detail.note).
+    _blast_cache: dict[str, "object"] = {}
     for f in run.findings:
         tgt = f.source_file or (pairs[0][0] if pairs else "")
         if not tgt:
             continue
         if tgt not in _blast_cache:
             try:
-                _blast_cache[tgt] = compute_blast(repo, tgt)
+                _blast_cache[tgt] = compute_blast_detail(repo, tgt)
             except Exception as exc:  # noqa: BLE001 — advisory must not kill a run
-                _blast_cache[tgt] = ("", f"blast radius unavailable: {exc}")
-        f.blast, f.blast_note = _blast_cache[tgt]
-    for tgt, (tier, note) in _blast_cache.items():
-        if tier:
-            log(f"  [blast] {tgt}: {tier} — {note}")
+                _blast_cache[tgt] = None
+                f.blast, f.blast_note = "", f"blast radius unavailable: {exc}"
+        detail = _blast_cache[tgt]
+        if detail is not None:
+            f.blast, f.blast_note = detail.tier, detail.note
+    # hand the per-target details to the board (additive; None entries skipped)
+    run.blast_details = [d for d in _blast_cache.values() if d is not None]
+    for tgt, detail in _blast_cache.items():
+        if detail is not None and detail.tier:
+            log(f"  [blast] {tgt}: {detail.tier} — {detail.note}")
     _low = [f for f in run.findings
             if f.status == "confirmed_gap" and f.confidence == "low"]
     if _low:

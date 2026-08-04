@@ -24,6 +24,9 @@ class _StubVerifier:
         for f in sub.findings:
             f.status = f.status or "handled"
 
+    def close(self) -> None:
+        pass
+
 
 @pytest.fixture()
 def wired(monkeypatch, tmp_path):

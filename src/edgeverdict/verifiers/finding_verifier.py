@@ -42,7 +42,9 @@ from ..review import ReviewFinding, ReviewRun
 from ..execution import backend_from_env
 from .harness import Harness, VitestHarness
 from .vitest_verifier import (RepoProfile, _proc_tail, scrubbed_env,
-                              unfrozen_install)
+                              unfrozen_install,
+                              no_build_isolation_install,
+                              build_tool_seed_cmd)
 
 # Back-compat aliases: the vitest injection rules moved into VitestHarness
 # (harness.py) with their provenance comments; these names stay importable
@@ -281,6 +283,28 @@ class FindingVerifier:
                     self.log("  install: supplemented install failed; "
                              "retrying with declared dependencies only")
                     inst = self._run(fallback, self._workdir(repo))
+                # third rung: a pip BUILD-ISOLATION failure (fetching the
+                # [build-system] requires into pip's throwaway build env)
+                # fails on a fresh resample but not on a warm-cached base,
+                # so the same target flips to "environment failure" between
+                # runs. Detect the build-dep signature and retry with the
+                # build tools seeded + --no-build-isolation. Degrade out
+                # loud; never let a fragile build-env fetch zero the run.
+                tail = _proc_tail(inst)
+                build_iso_failed = inst.returncode != 0 and (
+                    "build dependencies" in tail
+                    or "getting requirements to build" in tail
+                    or "install build dependencies" in tail
+                )
+                nbi = no_build_isolation_install(self.profile.install_cmd)
+                seed = build_tool_seed_cmd(self.profile.install_cmd)
+                if build_iso_failed and nbi is not None and seed is not None:
+                    self.log("  install: build-isolation failed (fetching "
+                             "build deps); seeding setuptools+wheel and "
+                             "retrying with --no-build-isolation")
+                    seed_res = self._run(seed, self._workdir(repo))
+                    if seed_res.returncode == 0:
+                        inst = self._run(nbi, self._workdir(repo))
                 phases.append(f"install {time.monotonic() - t0:.1f}s")
                 if inst.returncode != 0:
                     self._prep_error = f"install failed: {_proc_tail(inst)}"
@@ -349,6 +373,23 @@ class FindingVerifier:
             finding.status = "broken_test"
             finding.observed = "could not read test name"
             return finding
+        # Parameterized proposals (@parameterized.expand / @pytest.mark.
+        # parametrize) fan one def into N suffixed node ids, so exact-node-id
+        # serial selection collects nothing. For these, stamp a unique gate
+        # mark into the function name and select by -k on it: the mark is a
+        # substring of every generated variant and cannot collide with a
+        # host test, preserving the no-misattribution guarantee.
+        is_param = getattr(self.harness, "_is_parameterized", None)
+        parameterized = bool(is_param and is_param(finding.test_code or ""))
+        serial_title = title
+        test_code = finding.test_code or ""
+        if parameterized:
+            _mark = "___evp0___"
+            marked = self.harness.mark_title(test_code, _mark)
+            if marked is not None:
+                test_code = marked
+                # recompute the (now-marked) title for -k selection
+                serial_title = self.harness.test_title(test_code) or title
         host_path: str | None = None
         if self._warm_repo and self.tests_file:
             host_path = os.path.join(self._warm_repo, self.tests_file)
@@ -358,7 +399,7 @@ class FindingVerifier:
             if os.path.isfile(cand):
                 target_path = cand
         injected, err = self.harness.inject(
-            self._pristine_tests or "", finding.test_code or "",
+            self._pristine_tests or "", test_code,
             host_path=host_path, target_path=target_path)
         if injected is None:
             finding.status = "broken_test"
@@ -375,7 +416,8 @@ class FindingVerifier:
             try:
                 self._run(
                     self.harness.serial_command(self.profile, self._cmd_tests_file,
-                                                title, out),
+                                                serial_title, out,
+                                                is_parameterized=parameterized),
                     self._workdir(repo),
                 )
             except subprocess.TimeoutExpired:

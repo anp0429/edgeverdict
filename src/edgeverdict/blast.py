@@ -22,6 +22,7 @@ from __future__ import annotations
 import ast
 import os
 import re
+from dataclasses import dataclass
 
 # Directories that are never part of the repo's own import graph.
 _SKIP_DIRS = {".git", "node_modules", "dist", "__pycache__", ".venv", "venv",
@@ -124,6 +125,30 @@ def compute_blast(repo_root: str, target_rel: str) -> tuple[str, str]:
     note: one line with the counts and up to three example importers, so a
     reader can check the claim instead of trusting it.
     """
+    detail = compute_blast_detail(repo_root, target_rel)
+    return detail.tier, detail.note
+
+
+@dataclass
+class BlastDetail:
+    """The full blast computation, importer LISTS exposed (not just counts)
+    so a human-inspection view can draw the dependency graph. compute_blast
+    returns only (tier, note); this returns the sets behind them. All lists
+    are module-level import edges the walk actually found — facts, not
+    inference."""
+    tier: str
+    note: str
+    target: str
+    direct: list[str]
+    transitive: list[str]
+    test_importers: list[str]
+    truncated: bool
+
+
+def compute_blast_detail(repo_root: str, target_rel: str) -> "BlastDetail":
+    """Same walk as compute_blast, but returns the importer SETS so the
+    whiteboard can render the graph. One scan, no extra cost — compute_blast
+    now delegates here and collapses the result to (tier, note)."""
     is_py = target_rel.endswith(_PY_EXT)
     candidates = _module_candidates(target_rel) if is_py else set()
 
@@ -193,7 +218,11 @@ def compute_blast(repo_root: str, target_rel: str) -> tuple[str, str]:
             + (f" ({n_tests} test file(s), counted separately)" if n_tests else "")
             + (f" — e.g. {examples}" if examples else " — nothing in-repo imports it")
             + (" [scan truncated at cap — counts are a lower bound]" if truncated else ""))
-    return tier, note
+    return BlastDetail(
+        tier=tier, note=note, target=tgt_norm,
+        direct=sorted(direct), transitive=sorted(transitive),
+        test_importers=sorted(test_importers), truncated=truncated,
+    )
 
 
 def triage(confidence: str, blast: str) -> str:

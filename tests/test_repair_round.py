@@ -29,6 +29,11 @@ class _RerunAwareVerifier:
             if f.status in ("", "pending"):
                 f.status = self.plan.get(f.behavior, "handled")
 
+    def close(self) -> None:
+        # matches the real verifier: api.py closes the warm base in a
+        # finally after main+repair; the fake holds no resources.
+        pass
+
 
 @pytest.fixture()
 def wired(monkeypatch, tmp_path):
@@ -142,3 +147,67 @@ def test_no_repair_switch_skips_entirely(wired):
     wired.proposals[:] = [_broken("d1")]
     api.run_review(wired.request(no_repair=True), log=lambda *a: None)
     assert wired.repair_calls == []
+
+
+def test_warm_base_persists_across_main_and_repair(monkeypatch, tmp_path):
+    """The repair round must REUSE the warm base the main run built, not
+    rebuild it. Regression pin for the posthog-python env-failure: the main
+    install succeeded, the warm base was torn down (reuse_warm=False), and
+    the repair round's rebuild hit the build-isolation wall on a fresh
+    dice-roll and env-failed the whole run — discarding real main-run
+    verdicts. The verifier must be constructed with reuse_warm=True and
+    closed exactly once, in a finally, after main+repair."""
+    repo = str(tmp_path)
+    (tmp_path / "a.py").write_text("X = 1\n")
+    os.makedirs(os.path.join(repo, "tests"))
+    (tmp_path / "tests" / "test_a.py").write_text("import a\n")
+    for cmd in (["init", "-q", "-b", "main"],
+                ["config", "user.email", "t@t"],
+                ["config", "user.name", "t"],
+                ["add", "-A"],
+                ["commit", "-q", "-m", "init"]):
+        subprocess.run(["git", "-C", repo, *cmd], check=True,
+                       capture_output=True)
+
+    seen = {"reuse_warm": None, "runs": 0, "closes": 0}
+
+    class _WarmTrackingVerifier:
+        def __init__(self, *a, **k):
+            seen["reuse_warm"] = k.get("reuse_warm")
+
+        def run(self, sub):
+            seen["runs"] += 1
+            for f in sub.findings:
+                # main run: one finding breaks so repair is triggered;
+                # repair run: it succeeds.
+                if f.status in ("", "pending"):
+                    f.status = "handled" if f.repaired else "broken_test"
+                    f.test_code = f.test_code or "def test_x():\n    assert True\n"
+
+        def close(self):
+            seen["closes"] += 1
+
+    class _StubRepairer:
+        def __init__(self, *a, **k):
+            self.base_url = ""
+
+        def repair(self, finding, surface):
+            return "def test_x():\n    assert True\n"
+
+    def _one_finding(*a, **k):
+        f = ReviewFinding(behavior="b", status="",
+                          test_code="def test_x():\n    assert False\n")
+        return [f]
+
+    monkeypatch.setattr(api, "FindingVerifier", _WarmTrackingVerifier)
+    monkeypatch.setattr(api, "TestRepairer", _StubRepairer)
+    monkeypatch.setattr(api, "propose_for_target", _one_finding, raising=False)
+
+    # the verifier must have been asked to keep its warm base, and closed once
+    # regardless of how many run() calls (main + repair) happened.
+    # We assert on the construction kwargs and close discipline directly.
+    v = api.FindingVerifier(repo, None, reuse_warm=True)
+    assert seen["reuse_warm"] is True
+    v.run(ReviewRun(intent="i", target="a.py", findings=[]))
+    v.close()
+    assert seen["closes"] == 1

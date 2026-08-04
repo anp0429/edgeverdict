@@ -74,6 +74,9 @@ class ReviewRun:
     # set when the environment itself failed (install/build/smoke/fidelity):
     # a run-level fact, rendered ONCE as a banner — never as per-finding noise
     env_error: str = ""
+    # per-target blast detail (edgeverdict.blast.BlastDetail), populated by the
+    # api layer; drives the blast pane. Empty list -> no pane (back-compat).
+    blast_details: list = field(default_factory=list)
 
     @property
     def gaps(self) -> list[ReviewFinding]:
@@ -297,6 +300,22 @@ header { padding:20px 24px; border-bottom:1px solid #d9d8d2; }
 h1 { font-size:18px; font-weight:600; margin:0; }
 .sub { color:#76756e; font-size:13px; margin-top:6px; white-space:pre-wrap; max-width:900px; }
 .summary { padding:14px 24px; font-size:14px; border-bottom:1px solid #d9d8d2; }
+.blast { padding:14px 24px; border-bottom:1px solid #d9d8d2; }
+.btitle { font-size:13px; font-weight:600; color:#44443f; margin-bottom:10px; }
+.bcard { border:1px solid #e0dfd8; border-radius:10px; padding:12px 14px; margin-bottom:10px; }
+.bhead { display:flex; align-items:center; gap:10px; margin-bottom:10px; }
+.btgt { font-family:ui-monospace,SFMono-Regular,monospace; font-size:13px; color:#33332f; }
+.btier { color:#fff; font-size:11px; font-weight:600; padding:2px 9px; border-radius:20px; }
+.btrunc { font-size:12px; color:#a32d2d; margin-bottom:8px; }
+.bg { display:flex; flex-wrap:wrap; align-items:baseline; gap:6px; margin:6px 0; }
+.bl { font-size:12px; color:#76756e; min-width:120px; }
+.bn { font-size:12px; color:#a3a29c; font-style:italic; }
+.chips { display:inline-flex; flex-wrap:wrap; gap:5px; }
+.chip { font-family:ui-monospace,SFMono-Regular,monospace; font-size:11px; background:#f0efe9; color:#44443f; padding:2px 7px; border-radius:5px; }
+.bmore { display:inline; }
+.bmore summary { display:inline; font-size:11px; color:#5a76a8; cursor:pointer; margin-left:4px; }
+.bmore .chips { margin-top:6px; }
+@media (prefers-color-scheme: dark){ .chip{ background:#26261f; color:#c9c8be; } .btrunc{ color:#f09595; } }
 .envfail { padding:14px 24px; font-size:14px; font-weight:600; color:#fff;
            background:#a32d2d; }
 .envfail .detail { font-weight:400; font-size:13px; margin-top:4px;
@@ -326,6 +345,66 @@ pre.gap-test { border:1px solid #e0b4b4; max-height:340px; overflow:auto; }
 @media (prefers-color-scheme: dark){ .audit{ background:#232019; } }
 .audit .ev { color:#76756e; margin-top:4px; font-family:ui-monospace,monospace; }
 """
+
+
+_BLAST_INLINE = 8  # importers shown before the rest fold behind "+N more"
+
+
+def _blast_chip_group(label: str, items: list[str]) -> str:
+    """One labeled group of importer chips. Up to _BLAST_INLINE render
+    inline; the remainder fold behind a <details>+N more</details> so the
+    board NEVER hides scope (collapse, never cap) while staying readable.
+    Every path stays in the document — searchable and complete."""
+    if not items:
+        return (f'<div class="bg"><span class="bl">{html.escape(label)}</span>'
+                f'<span class="bn">none</span></div>')
+    inline = items[:_BLAST_INLINE]
+    rest = items[_BLAST_INLINE:]
+    chips = "".join(f'<span class="chip">{html.escape(i)}</span>' for i in inline)
+    more = ""
+    if rest:
+        rest_chips = "".join(
+            f'<span class="chip">{html.escape(i)}</span>' for i in rest)
+        more = (f'<details class="bmore"><summary>+{len(rest)} more</summary>'
+                f'<div class="chips">{rest_chips}</div></details>')
+    return (f'<div class="bg"><span class="bl">{html.escape(label)} '
+            f'({len(items)})</span>'
+            f'<span class="chips">{chips}</span>{more}</div>')
+
+
+def _blast_pane(run: ReviewRun) -> str:
+    """The blast-radius pane: one card per target with a tier badge and
+    three importer groups (direct / one-hop / test files). Sits between the
+    summary and the finding cards. No details -> empty string (a run with no
+    blast info renders exactly as before)."""
+    details = getattr(run, "blast_details", None) or []
+    if not details:
+        return ""
+    _tier_color = {"wide": "#b9770e", "moderate": "#5a76a8", "narrow": "#76756e"}
+    cards = []
+    for d in details:
+        tier = getattr(d, "tier", "") or ""
+        color = _tier_color.get(tier, "#76756e")
+        target = getattr(d, "target", "") or ""
+        trunc = ""
+        if getattr(d, "truncated", False):
+            trunc = ('<div class="btrunc">scan truncated at cap — importer '
+                     'lists are a lower bound</div>')
+        groups = (
+            _blast_chip_group("direct importers", list(getattr(d, "direct", [])))
+            + _blast_chip_group("one-hop importers",
+                                list(getattr(d, "transitive", [])))
+            + _blast_chip_group("test files",
+                                list(getattr(d, "test_importers", [])))
+        )
+        cards.append(
+            f'<div class="bcard">'
+            f'<div class="bhead"><span class="btgt">{html.escape(target)}</span>'
+            f'<span class="btier" style="background:{color}">{html.escape(tier)}'
+            f' blast</span></div>{trunc}{groups}</div>'
+        )
+    return f'<div class="blast"><div class="btitle">Blast radius</div>' \
+           f'{"".join(cards)}</div>'
 
 
 def render_review_html(run: ReviewRun, path: str) -> str:
@@ -424,6 +503,7 @@ def render_review_html(run: ReviewRun, path: str) -> str:
         f'<b>{covered}</b> covered/handled · <b>{broken}</b> test didn\'t run · '
         f'<b>{timed}</b> timed out · '
         f'<b>{len(run.findings)}</b> behaviors reviewed</div>'
+        f'{_blast_pane(run)}'
         f'<div class="wrap">{"".join(cards)}</div>'
     )
     with open(path, "w", encoding="utf-8") as fh:

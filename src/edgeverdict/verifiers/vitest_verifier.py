@@ -65,6 +65,56 @@ def scrubbed_env(profile_env: dict[str, str],
     return env
 
 
+def no_build_isolation_install(install_cmd: list[str]) -> list[str] | None:
+    """The retry command for a pip install that failed while installing
+    BUILD DEPENDENCIES in pip's isolated build environment. None when the
+    command is not a pip install, or already carries --no-build-isolation
+    (nothing left to fall back to).
+
+    Learned on posthog/posthog-python: its [build-system] requires
+    setuptools>=83, which pip fetches into an isolated build env before it
+    can build the editable install. That fetch is fragile in the sandbox —
+    it succeeds on a warm-cached base (setuptools already resolved) and
+    fails on a fresh resample, so the SAME target that ran clean last night
+    reports "environment failure, 0 gaps" today. A build-isolation failure
+    must degrade the run (with a printed note), never silently zero it.
+
+    The retry drops --no-cache-dir's isolation: it seeds setuptools+wheel
+    into the install env FIRST (a plain, non-isolated pip install of the
+    build tools), then re-runs the original install with
+    --no-build-isolation so pip builds against the seeded tools instead of
+    fetching them into a throwaway env. Returned as a two-command sequence
+    joined by &&-equivalent semantics handled by the caller."""
+    if "pip" not in install_cmd or "install" not in install_cmd:
+        return None
+    if "--no-build-isolation" in install_cmd:
+        return None
+    # insert --no-build-isolation right after "install"
+    out: list[str] = []
+    for a in install_cmd:
+        out.append(a)
+        if a == "install":
+            out.append("--no-build-isolation")
+    return out
+
+
+def build_tool_seed_cmd(install_cmd: list[str]) -> list[str] | None:
+    """The pre-seed command paired with no_build_isolation_install: install
+    setuptools+wheel into the same env (same interpreter, same --user /
+    --no-cache-dir flags) so --no-build-isolation has the build backend
+    present. None when install_cmd is not a recognizable pip install."""
+    if "pip" not in install_cmd or "install" not in install_cmd:
+        return None
+    # take the interpreter + pip preamble up to and including "install",
+    # keep the environment-shaping flags (--user, --no-cache-dir, --quiet),
+    # then seed the build tools instead of the project.
+    idx = install_cmd.index("install")
+    head = install_cmd[: idx + 1]
+    keep = [a for a in install_cmd[idx + 1:]
+            if a in ("--user", "--no-cache-dir", "--quiet")]
+    return [*head, *keep, "setuptools>=61.0", "wheel"]
+
+
 def unfrozen_install(install_cmd: list[str]) -> list[str] | None:
     """The retry command for a failed frozen install: same command with
     --frozen-lockfile swapped for --no-frozen-lockfile. None when the

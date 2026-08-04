@@ -385,6 +385,48 @@ class PytestHarness(Harness):
                         return node.name, sub.name, sub.lineno
         return None
 
+    @staticmethod
+    def _is_parameterized(test_code: str) -> bool:
+        """True when the proposal's test function carries a parameterizing
+        decorator — @parameterized.expand(...) or @pytest.mark.parametrize.
+        These fan ONE def into N collected tests with SUFFIXED node ids
+        (test_x_0_case / test_x[case]), so an exact `file::Class::test_x`
+        node id matches ZERO of them and the verdict is lost as a spurious
+        "name match failed". Detected from the ast decorator list, not a
+        text scan, so a decorator named in a docstring can't trip it."""
+        try:
+            tree = ast.parse(test_code or "")
+        except SyntaxError:
+            return False
+
+        def _decorated(fn) -> bool:
+            for dec in fn.decorator_list:
+                # unwrap Call(...) -> the decorator expression
+                node = dec.func if isinstance(dec, ast.Call) else dec
+                # collect the dotted attribute/name chain as text
+                parts = []
+                while isinstance(node, ast.Attribute):
+                    parts.append(node.attr)
+                    node = node.value
+                if isinstance(node, ast.Name):
+                    parts.append(node.id)
+                name = ".".join(reversed(parts))
+                if ("parametrize" in name or "parameterized" in name
+                        or name.endswith("expand")):
+                    return True
+            return False
+
+        for node in tree.body:
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) \
+                    and node.name.startswith("test_"):
+                return _decorated(node)
+            if isinstance(node, ast.ClassDef):
+                for sub in node.body:
+                    if isinstance(sub, (ast.FunctionDef, ast.AsyncFunctionDef)) \
+                            and sub.name.startswith("test_"):
+                        return _decorated(sub)
+        return False
+
     def test_title(self, test_code: str) -> str | None:
         found = self._test_node(test_code)
         if found:
@@ -422,9 +464,28 @@ class PytestHarness(Harness):
     project_relative_cmd_paths = True
 
     def serial_command(self, profile, tests_file: str, title: str,
-                       out: str) -> list[str]:
+                       out: str, is_parameterized: bool = False) -> list[str]:
         # node id, not -k: exactly one collected test can match, so a
         # pre-existing failure can never be misattributed to this finding.
+        #
+        # EXCEPTION — parameterized tests. @parameterized.expand /
+        # @pytest.mark.parametrize fan ONE def into N collected tests with
+        # SUFFIXED node ids (Class::test_x_0_case, test_x[case]). The bare
+        # `Class::test_x` node id matches ZERO of them, so the run collects
+        # nothing and the verdict is lost as a spurious "name match failed"
+        # — a GOOD proposal silently dropped, and a whole coverage hole for
+        # any Python repo that parameterizes (very common). For these, select
+        # by -k on the unique gate mark stamped into the function name
+        # (test_x___abN___): the mark is a substring of every generated
+        # variant AND cannot collide with a host test, so -k keeps the same
+        # no-misattribution guarantee node-id gave for the ordinary case.
+        if is_parameterized:
+            # title is Class::marked_name or marked_name; -k matches on the
+            # function-name part, which carries the unique mark.
+            k = title.split("::")[-1]
+            return profile.test_base + [
+                tests_file, "-k", k, "-q", f"--junit-xml={out}",
+            ]
         return profile.test_base + [
             f"{tests_file}::{title}", "-q", f"--junit-xml={out}",
         ]

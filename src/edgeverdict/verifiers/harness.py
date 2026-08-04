@@ -95,9 +95,11 @@ class Harness(ABC):
 
     @abstractmethod
     def serial_command(self, profile, tests_file: str, title: str,
-                       out: str) -> list[str]:
+                       out: str, is_parameterized: bool = False) -> list[str]:
         """The runner invocation for ONE titled test, machine-readable
-        results written to `out`."""
+        results written to `out`. is_parameterized lets a pytest-style
+        harness switch to -k selection when one def fans into N node ids;
+        harnesses without that concern (vitest) ignore it."""
 
     @abstractmethod
     def batch_command(self, profile, tests_file: str, mark_prefix: str,
@@ -620,9 +622,10 @@ class VitestHarness(Harness):
         return code if n else None
 
     def serial_command(self, profile, tests_file: str, title: str,
-                       out: str) -> list[str]:
+                       out: str, is_parameterized: bool = False) -> list[str]:
         # run ONLY the injected test by name, so pre-existing suite failures
-        # can never be misattributed to this finding.
+        # can never be misattributed to this finding. (is_parameterized is a
+        # pytest concern — vitest's -t already matches by title prefix.)
         return profile.test_base + [
             "-t", title, "--typecheck.enabled=false",
             "--reporter=json", f"--outputFile={out}",
