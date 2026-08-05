@@ -44,7 +44,7 @@ from .config import (
 from .fingerprint import verdict_summary
 from .proposal_cache import propose_or_cached
 from .providers import endpoint_label
-from .blast import compute_blast_detail, triage
+from .blast import BlastDetail, compute_blast_detail, triage
 from .review import (
     ReviewFinding,
     ReviewRun,
@@ -458,7 +458,7 @@ def run_review(request: ReviewRequest, log=print) -> ReviewResult:
     # compute_blast_detail returns the importer LISTS (not just tier/note)
     # so the review board can render the blast pane; f.blast/f.blast_note
     # stay exactly as before (detail.tier/detail.note).
-    _blast_cache: dict[str, "object"] = {}
+    _blast_cache: dict[str, BlastDetail | None] = {}
     for f in run.findings:
         tgt = f.source_file or (pairs[0][0] if pairs else "")
         if not tgt:
