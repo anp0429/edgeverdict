@@ -44,7 +44,7 @@ from .config import (
 from .fingerprint import verdict_summary
 from .proposal_cache import propose_or_cached
 from .providers import endpoint_label
-from .blast import compute_blast, compute_blast_detail, triage
+from .blast import compute_blast_detail, triage
 from .review import (
     ReviewFinding,
     ReviewRun,
