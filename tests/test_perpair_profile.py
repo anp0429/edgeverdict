@@ -68,7 +68,7 @@ def test_run_review_builds_a_profile_for_every_pair():
 
     from edgeverdict import api
 
-    src = inspect.getsource(api.run_review)
+    src = inspect.getsource(api._run_review_pipeline)
     loop = src.split("for tgt, tst_path in pairs:", 1)[1]
     assert "FindingVerifier(repo, pair_profile" in loop
     assert "project_dir=pair_project_dir" in loop

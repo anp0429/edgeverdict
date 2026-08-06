@@ -19,7 +19,7 @@ import sys
 import threading
 import uuid
 from collections import deque
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Mapping, Protocol, Sequence
 
@@ -53,7 +53,15 @@ class DockerLimits:
     # exists to bound runaway TEST writes, not install downloads, so the
     # install phase gets a generous ceiling while execution stays tight.
     install_file_size_bytes: int = 512 * 1024 * 1024
-    tmpfs_size: str = "512m"
+    # /tmp is a RAM-backed tmpfs, so this bounds MEMORY, not just disk. 512m
+    # suits single-package installs. A whole-monorepo pnpm install (many
+    # workspaces) writes far more than that into /tmp and hits ENOSPC. For a
+    # TRUSTED monorepo you can raise it via EDGEVERDICT_TMPFS_SIZE (e.g. "8g");
+    # the value is a docker --tmpfs size string (e.g. "512m", "4g"). The
+    # default stays conservative because it caps RAM for untrusted repos.
+    tmpfs_size: str = field(
+        default_factory=lambda: os.environ.get(
+            "EDGEVERDICT_TMPFS_SIZE", "512m"))
     max_output_bytes: int = 2 * 1024 * 1024
 
 
@@ -427,10 +435,33 @@ class DockerBackend:
             return self.limits.install_file_size_bytes
         return self.limits.file_size_bytes
 
+    def _db_url(self) -> str:
+        """Mode 2 (bring-your-own-database): a host-run Postgres the sandbox
+        may reach for integration tests. Set EDGEVERDICT_DB_URL to the host
+        connection string (e.g. postgresql://postgres:postgres@localhost:5432).
+        Empty -> DB mode off (default; sandbox stays --network none). When set,
+        the test phase is given network + a host.docker.internal mapping and
+        DATABASE_URL is injected (localhost rewritten to the host gateway so a
+        container-side connection reaches the host's Postgres). OPT-IN and
+        trust-scoped: this hands AI-generated test code a live DB + network,
+        so use only with a trusted repo against a DISPOSABLE database."""
+        return os.environ.get("EDGEVERDICT_DB_URL", "")
+
+    def _container_db_url(self) -> str:
+        # rewrite a host-local URL so it resolves from inside the container.
+        url = self._db_url()
+        return url.replace("localhost", "host.docker.internal").replace(
+            "127.0.0.1", "host.docker.internal")
+
     def _network(self, args: Sequence[str]) -> str:
         if self.network_policy == "all":
             return "bridge"
         if self.network_policy == "install" and _looks_like_install(args):
+            return "bridge"
+        # DB mode: the TEST phase needs to reach the host Postgres. Install is
+        # handled by the policy above; a non-install command under DB mode
+        # gets bridge network so the connection to host.docker.internal works.
+        if self._db_url() and not _looks_like_install(args):
             return "bridge"
         return "none"
 
@@ -482,6 +513,18 @@ class DockerBackend:
             "--workdir",
             container_cwd,
         ]
+        # Mode 2 DB access: when EDGEVERDICT_DB_URL is set and this is a test
+        # (network-bearing) command, map host.docker.internal to the host and
+        # inject DATABASE_URL so pg-meta-style tests can CREATE their
+        # disposable test databases against the host Postgres. Install
+        # commands don't get the DB (they don't need it); the host mapping is
+        # harmless there but we scope it to the DB-bearing command for clarity.
+        if self._db_url() and self._network(args) == "bridge" and \
+                not _looks_like_install(args):
+            command.extend([
+                "--add-host", "host.docker.internal:host-gateway",
+            ])
+            safe_env.setdefault("DATABASE_URL", self._container_db_url())
         # Python user-site inside the mount: the only writable+executable
         # surface in the container. Every command gets it so the install
         # and the test runs resolve the same site; harmless for JS lanes.

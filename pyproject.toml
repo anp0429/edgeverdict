@@ -36,6 +36,10 @@ dependencies = [
     # undeclared client turns into a review that silently proposes nothing.
     "openai>=1.0",
     "anthropic>=0.40",
+    # Auto-provisioned test services (EDGEVERDICT_AUTO_SERVICES) read the
+    # package's own compose file; compose is YAML, and YAML deserves a real
+    # parser. Imported lazily, only on the opt-in path.
+    "pyyaml>=6.0",
 ]
 
 [project.optional-dependencies]

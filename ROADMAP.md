@@ -57,7 +57,7 @@ break the core thesis.
 
 ## Next
 
-- [ ] **`prove` (0.5.0 headline).** The author-side verb, caveman-simple: an
+- [x] **`prove` (0.5.0 headline, shipped).** The author-side verb, caveman-simple: an
   agent (or you) wrote code, `edgeverdict prove` tries to break it, and the
   output is one line first: `BROKEN: N failing tests, M attempts` or
   `HELD: M executed attempts, 0 broke it`, evidence below. Zero required
@@ -99,6 +99,29 @@ break the core thesis.
   line as the contract (see `BENCHMARK.md`). It reasons from "what the code does," which
   is the bug when the code is buggy. Next: reason from the intent's implied contract,
   not the current behavior. It stays advisory regardless.
+
+## Monorepos and service-backed tests
+
+- [x] **Mode 2, bring your own environment (shipped).** Opt-in database
+  reach for the test phase (`EDGEVERDICT_DB_URL`, install stays
+  isolated), a cross-run warm-base cache keyed on dependency state
+  (`EDGEVERDICT_WARM_CACHE`), wrapper-aware test title parsing (suites
+  wrapping the runner in helpers like `withTestDatabase` now gate), and
+  sandbox size overrides for whole-workspace installs
+  (`EDGEVERDICT_TMPFS_SIZE`, `EDGEVERDICT_SANDBOX_MEMORY`). Proven end
+  to end on the supabase/supabase monorepo: pg-meta's live-Postgres
+  integration suite gated with real verdicts.
+- [ ] **Mode 3, provision the package's own test services.** Today the
+  human stands up the database and sets the URL. Next: detect a
+  package-level test-service declaration and run it, the package's own
+  compose file so the exact right image is built rather than a stock
+  stand-in, pick a free port, wait on the healthcheck, wire the
+  resulting URL into the database-reach machinery automatically, and
+  tear down after (or keep warm across runs). Detection ladder: a
+  package test compose first, a test wrapper script second, nothing
+  means no services and the run proceeds as-is. Scope guard: per-package
+  test services only, never a repository's full platform stack; the
+  point is testing one package, not booting the product.
 
 ## Model work (the reward-function thesis)
 

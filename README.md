@@ -3,7 +3,7 @@
 [![CI](https://github.com/anp0429/edgeverdict/actions/workflows/ci.yml/badge.svg)](https://github.com/anp0429/edgeverdict/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-<!-- README_V9_SANDBOXFULL -->
+<!-- README_V10_MODE2 -->
 
 A review gate that proposes edge cases and executes them before
 judging. A model proposes the tests; the verdict comes from running
@@ -345,6 +345,59 @@ Your stack next? Open an issue with a clonable repo. A harness is one
 file behind three contracts: find the tests, execute a proposal, classify
 the raised error.
 
+## Monorepos and integration tests
+
+A repository's most valuable tests are often the ones that talk to a real
+database, and monorepos are where most real code lives. Three opt-in
+pieces, all off by default, make those suites gateable:
+
+**Reaching a database.** The sandbox has no network, so a generated test
+that needs Postgres cannot reach one. Setting `EDGEVERDICT_DB_URL` grants
+the test phase (never the install) a bridge network with a host gateway
+and injects the URL as `DATABASE_URL`, rewriting `localhost` to the
+container's host alias so tests reach a database already running on your
+machine. With the variable unset, execution is byte-identical to the
+hardened default. This hands model-written test code a network and a live
+database, so it is for repositories you trust and a disposable database
+only; the threat model is in [SECURITY.md](SECURITY.md).
+
+**A warm base across runs.** Installing a monorepo's dependencies and
+smoke-verifying the environment are properties of the repository's
+dependency state, not of the change under review, so
+`EDGEVERDICT_WARM_CACHE=1` caches both across runs. Details in Caching
+and cost below.
+
+**Room to install.** A whole-workspace install can overflow the
+sandbox's RAM-backed `/tmp`. `EDGEVERDICT_TMPFS_SIZE` raises it (default
+`512m`); raise `EDGEVERDICT_SANDBOX_MEMORY` (default `2g`) with it,
+since tmpfs pages count against container memory.
+
+| Variable | Default | Effect |
+| --- | --- | --- |
+| `EDGEVERDICT_DB_URL` | unset | test phase may reach a database you provide |
+| `EDGEVERDICT_WARM_CACHE` | unset | `1` reuses installed deps + smoke verification across runs |
+| `EDGEVERDICT_TMPFS_SIZE` | `512m` | sandbox `/tmp` size (RAM-backed) |
+| `EDGEVERDICT_SANDBOX_MEMORY` | `2g` | container memory limit |
+
+The harness also parses test titles through wrapper functions. Suites
+that need services usually wrap the runner
+(`withTestDatabase('title', async ({db}) => ...)` instead of a literal
+`test(...)`), and a title parser that only matched `test(`/`it(` failed
+on exactly the repositories this mode exists for. Titles now resolve
+through arbitrary wrappers, outermost first.
+
+Proven end to end on the supabase/supabase monorepo: the `pg-meta`
+package, whose suite runs hundreds of integration tests against a live
+Postgres, gated with generated tests injected through the repo's own
+`withTestDatabase` wrapper, executed against the live database, real
+verdicts returned, with the warm cache skipping install and smoke on the
+second run.
+
+The honest boundary: today you stand up the database and set the URL
+yourself. Detecting what services a package needs and provisioning them
+from the package's own test compose is the next step, in
+[ROADMAP.md](ROADMAP.md).
+
 ## Caching and cost
 
 Proposing tests is the only step that costs tokens, so it is the step that is
@@ -357,6 +410,16 @@ The gate is batched: one harness invocation gates many behaviors, with a
 serial fallback per behavior where batching cannot isolate a result. Batched
 and serial paths are asserted verdict-identical by fingerprint. With
 `--scope`, the cost curve prints before any spend.
+
+Install and smoke verification cache across runs, opt-in with
+`EDGEVERDICT_WARM_CACHE=1`. Both are properties of the repository's
+dependency state, not of the change under review, so the cache is keyed
+on the lockfile hash plus the install command and package directory; on
+a hit, both the install and the smoke run are skipped and the run goes
+straight to injection and gating. The repository source is always
+freshly copied (the cache holds dependencies only, so code is never
+stale), the smoke marker is written last so a half-written cache is
+never served, and any key mismatch falls back to a normal install.
 
 ## Local and open-weight models
 
@@ -508,6 +571,9 @@ is dropped.
 - Impacted files without their own tests are gated in the nearest existing
   test file, which can skew results toward `broken_test` until test
   scaffolding is implemented.
+- Database-backed integration suites run only with the explicit
+  `EDGEVERDICT_DB_URL` opt-in and a database you provide. The tool does
+  not provision services yet; that is roadmap.
 - The audit pass is advisory and not yet load-bearing.
 - Vitest (pnpm or npm) is the primary harness. Python/pytest repos are
   supported with the same verdict taxonomy, but that path is new and

@@ -193,7 +193,7 @@ class VitestHarness(Harness):
             # test imports). Otherwise leave them and fail honestly.
             pristine = self.resolve_free_imports(
                 pristine, test_code, host_path, target_path)
-        openers = re.findall(r"^(describe|test|it)\b", pristine, flags=re.M)
+        openers = re.findall(r"^(describe|test|it)\b", pristine, flags=re.MULTILINE)
         if openers and openers[-1] == "describe":
             tail = pristine.rstrip()
             # Column-0 close, with or without a semicolon: prettier semi:false
@@ -241,8 +241,12 @@ class VitestHarness(Harness):
         cheaply checkable). Anything unverifiable is dropped — the old
         ReferenceError is strictly better than a transform error that
         poisons the whole file."""
-        from ..ts_surface import (_ts_exports, _ts_resolve,
-                                  bound_import_names, parse_es_imports)
+        from ..ts_surface import (
+            _ts_exports,
+            _ts_resolve,
+            bound_import_names,
+            parse_es_imports,
+        )
         host_dir = os.path.dirname(host_path)
         host_imps = parse_es_imports(pristine)
         host_names = bound_import_names(pristine)
@@ -349,17 +353,7 @@ class VitestHarness(Harness):
     #   2. a sibling test in the same package imports it -> reuse that exact
     #      specifier, verbatim
     # Anything else is left unbound and fails honestly, exactly as today.
-    _JS_GLOBALS = frozenset("""
-        describe test it expect vi beforeEach afterEach beforeAll afterAll
-        console JSON Object Array String Number Boolean Promise Math Date
-        Map Set WeakMap WeakSet Symbol Error TypeError RangeError RegExp
-        globalThis process Buffer URL URLSearchParams AbortController
-        setTimeout clearTimeout setInterval clearInterval structuredClone
-        require module exports undefined null true false NaN Infinity
-        async await return const let var function class new typeof instanceof
-        if else for while do switch case break continue throw try catch finally
-        of in this void delete yield import export default from as
-    """.split())
+    _JS_GLOBALS = frozenset(["describe", "test", "it", "expect", "vi", "beforeEach", "afterEach", "beforeAll", "afterAll", "console", "JSON", "Object", "Array", "String", "Number", "Boolean", "Promise", "Math", "Date", "Map", "Set", "WeakMap", "WeakSet", "Symbol", "Error", "TypeError", "RangeError", "RegExp", "globalThis", "process", "Buffer", "URL", "URLSearchParams", "AbortController", "setTimeout", "clearTimeout", "setInterval", "clearInterval", "structuredClone", "require", "module", "exports", "undefined", "null", "true", "false", "NaN", "Infinity", "async", "await", "return", "const", "let", "var", "function", "class", "new", "typeof", "instanceof", "if", "else", "for", "while", "do", "switch", "case", "break", "continue", "throw", "try", "catch", "finally", "of", "in", "this", "void", "delete", "yield", "import", "export", "default", "from", "as"])
 
     _IDENT_RE = re.compile(r"(?<![\w$.])([A-Za-z_$][\w$]*)")
     _DECL_RE = re.compile(
@@ -569,6 +563,24 @@ class VitestHarness(Harness):
                 at = idx + 1
         return "\n".join(split[:at] + lines + split[at:])
 
+    # A test declaration is `test(` or `it(` — OR a custom wrapper whose
+    # first arg is a string and second is a function, e.g. pg-meta's
+    # `withTestDatabase('title', async ({db}) => {...})`. Repos with shared
+    # test setup wrap the runner this way, and those are exactly the
+    # integration-tested (DB-backed) repos, so the wrapper case is common
+    # precisely where it matters. We try the precise test/it form first (so
+    # well-formed tests never touch the general path), then fall back to the
+    # structural "IDENT('string', <function>)" form. First match wins, and in
+    # a real proposal the OUTERMOST wrapper precedes any inner string+callback
+    # call (e.g. executeQuery('sql', () => ...)), so the outer title is taken.
+    _TITLE_TESTIT = re.compile(
+        r"""(?:test|it)\(\s*(['"`])((?:\\.|(?!\1).)*)\1""")
+    _TITLE_WRAPPER = re.compile(
+        r"""[A-Za-z_$][\w$]*\(\s*(['"`])((?:\\.|(?!\1).)*)\1\s*,\s*"""
+        r"""(?:async\s*)?(?:\([^)]*\)|[A-Za-z_$][\w$]*)\s*=>"""
+        r"""|[A-Za-z_$][\w$]*\(\s*(['"`])((?:\\.|(?!\3).)*)\3\s*,\s*"""
+        r"""(?:async\s+)?function\b""")
+
     def test_title(self, test_code: str) -> str | None:
         # Match the OPENING quote, then read until the SAME unescaped quote —
         # a title opened with ' must not be truncated at an apostrophe it
@@ -576,12 +588,16 @@ class VitestHarness(Harness):
         # every -t / mark lookup miss ("name match failed", supabase/mcp#316
         # x8). Then unescape JS string escapes so the extracted title equals
         # the title vitest RENDERS and reports (what -t matches against).
-        m = re.search(
-            r"""(?:test|it)\(\s*(['"`])((?:\\.|(?!\1).)*)\1""",
-            test_code or "")
-        if not m:
-            return None
-        return VitestHarness._unescape_js(m.group(2))
+        code = test_code or ""
+        m = self._TITLE_TESTIT.search(code)
+        if m:
+            return VitestHarness._unescape_js(m.group(2))
+        # custom test wrapper (string-then-function): the title is the first
+        # string arg. group(2) is the arrow form, group(4) the function form.
+        m = self._TITLE_WRAPPER.search(code)
+        if m:
+            return VitestHarness._unescape_js(m.group(2) or m.group(4))
+        return None
 
     @staticmethod
     def _unescape_js(s: str) -> str:
@@ -880,9 +896,9 @@ class VitestHarness(Harness):
             exported = set(re.findall(
                 r"^export\s+(?:async\s+)?(?:function|const|let|var|class|"
                 r"enum)\s+([A-Za-z_$][\w$]*)",
-                _read(os.path.join(repo, target)), re.M))
+                _read(os.path.join(repo, target)), re.MULTILINE))
             for grp in re.findall(r"^export\s*\{([^}]*)\}",
-                                  _read(os.path.join(repo, target)), re.M):
+                                  _read(os.path.join(repo, target)), re.MULTILINE):
                 for nm in grp.split(","):
                     nm = nm.strip().split(" as ")[-1].strip()
                     if nm:

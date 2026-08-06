@@ -31,6 +31,23 @@ during installation, so this mode can exfiltrate data available inside the
 sandbox and must be used only for repositories you trust. `all` is still less
 safe and is intended only for debugging trusted projects.
 
+## Database reach mode (`EDGEVERDICT_DB_URL`)
+
+Setting `EDGEVERDICT_DB_URL` changes the boundary for the test phase
+only: it attaches the test container (never the install) to a bridge
+network with a host gateway and injects the URL as `DATABASE_URL`,
+rewriting `localhost`/`127.0.0.1` to the container's host alias. The
+consequence is explicit: model-generated test code gets network access
+and a live database during the test phase.
+
+Use it only with repositories you trust and a database that is
+disposable by construction, a throwaway container or per-test databases
+holding nothing you care about. Never point it at a database with real
+data or shared credentials. All other hardening (read-only root,
+non-root user, dropped capabilities, environment filtering, resource
+limits) is unchanged, and with the variable unset the execution path is
+identical to the default hardened mode.
+
 ## Unsafe local compatibility mode
 
 Local execution is disabled by default. It requires both:

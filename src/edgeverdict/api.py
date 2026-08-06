@@ -56,6 +56,7 @@ from .review import (
     flag_systematic_artifacts,
     render_review_html,
 )
+from .services import ServiceError, auto_services
 from .verifiers.assertion_lint import lint_test
 from .verifiers.finding_verifier import FindingVerifier
 from .verifiers.harness import harness_for_profile, harness_for_target
@@ -121,6 +122,24 @@ class ReviewResult:
 
 
 def run_review(request: ReviewRequest, log=print) -> ReviewResult:
+    """The full review pipeline, wrapped in the opt-in test-service
+    lifecycle (EDGEVERDICT_AUTO_SERVICES=1): a package that declares its
+    own test-service compose gets it provisioned before the run and torn
+    down after, on EVERY surface (CLI review/prove, MCP, the Action),
+    because all of them come through here. With the flag unset this is a
+    plain call straight through. A provisioning failure stops the run
+    before any tokens are spent, cause first."""
+    repo = os.path.abspath(os.path.expanduser(request.repo))
+    try:
+        with auto_services(repo, request.target, log=log):
+            return _run_review_pipeline(request, log=log)
+    except ServiceError as e:
+        log("edgeverdict review — cannot start:")
+        log(f"  - {e}")
+        return ReviewResult(exit_code=1)
+
+
+def _run_review_pipeline(request: ReviewRequest, log=print) -> ReviewResult:
     """The full review pipeline: resolve config/refs/tests, propose, gate,
     audit, render the board, write the JSON artifact, append the dataset.
     All narration goes through `log` (print-shaped)."""

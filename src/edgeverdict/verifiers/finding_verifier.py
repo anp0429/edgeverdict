@@ -31,6 +31,7 @@ harness is vitest, so every existing caller is unchanged.
 
 from __future__ import annotations
 
+import hashlib
 import os
 import re
 import shutil
@@ -38,13 +39,17 @@ import subprocess
 import tempfile
 import time
 
-from ..review import ReviewFinding, ReviewRun
 from ..execution import backend_from_env
+from ..review import ReviewFinding, ReviewRun
 from .harness import Harness, VitestHarness
-from .vitest_verifier import (RepoProfile, _proc_tail, scrubbed_env,
-                              unfrozen_install,
-                              no_build_isolation_install,
-                              build_tool_seed_cmd)
+from .vitest_verifier import (
+    RepoProfile,
+    _proc_tail,
+    build_tool_seed_cmd,
+    no_build_isolation_install,
+    scrubbed_env,
+    unfrozen_install,
+)
 
 # Back-compat aliases: the vitest injection rules moved into VitestHarness
 # (harness.py) with their provenance comments; these names stay importable
@@ -136,6 +141,63 @@ def _strip_pm_noise(tail: str) -> str:
             if not ln.strip().lower().startswith(("npm warn", "npm notice"))]
     cleaned = "\n".join(kept).strip()
     return (label + cleaned) if cleaned else tail
+
+
+def _warm_cache_enabled() -> bool:
+    """Cross-run node_modules + smoke cache is OPT-IN until validated. Set
+    EDGEVERDICT_WARM_CACHE=1 to reuse an installed dependency tree across
+    separate CLI invocations of the same repo — the install (~90s) and the
+    smoke probe (~75s) become a one-time cost per lockfile state instead of
+    per run. Off by default: a wrong cache would review against stale deps,
+    so we ship it behind a flag and fail SAFE (any doubt -> normal install)."""
+    return os.environ.get("EDGEVERDICT_WARM_CACHE", "") == "1"
+
+
+def _warm_cache_root() -> str:
+    base = os.environ.get("EDGEVERDICT_WARM_CACHE_DIR") or os.path.join(
+        os.path.expanduser("~"), ".edgeverdict", "warm-cache")
+    return base
+
+
+_LOCKFILES = (
+    "pnpm-lock.yaml", "package-lock.json", "yarn.lock", "bun.lockb",
+)
+
+
+def _dep_fingerprint(repo_root: str, workdir_rel: str,
+                     install_cmd: list[str]) -> str | None:
+    """A stable key for the installed dependency state: hash of the lockfile
+    (root and package-level, whichever exist) plus the install command. If no
+    lockfile is found the deps aren't reproducible enough to cache -> None
+    (caller falls back to a normal install). node_modules is a pure function
+    of the lockfile, so a matching hash means a matching install."""
+    h = hashlib.sha256()
+    found = False
+    # look for a lockfile at the repo root AND at the package workdir (a
+    # monorepo package may have its own, or share the root's).
+    seen: set[str] = set()
+    for rel_base in ("", workdir_rel):
+        d = os.path.normpath(os.path.join(repo_root, rel_base))
+        for lf in _LOCKFILES:
+            p = os.path.join(d, lf)
+            if p in seen:
+                continue
+            seen.add(p)
+            if os.path.isfile(p):
+                try:
+                    with open(p, "rb") as fh:
+                        h.update(lf.encode())
+                        h.update(fh.read())
+                    found = True
+                except OSError:
+                    return None
+    if not found:
+        return None
+    h.update(("\0".join(install_cmd)).encode())
+    # scope to the package dir too, so two packages in one monorepo sharing
+    # the root lockfile still get distinct node_modules trees.
+    h.update(workdir_rel.encode())
+    return h.hexdigest()[:16]
 
 
 class FindingVerifier:
@@ -263,7 +325,38 @@ class FindingVerifier:
         # but install/build let it escape as a traceback through the run.
         # An empty install_cmd means the profile declares no install step
         # (python repos: the running environment is assumed provisioned).
-        if self.profile.install_cmd:
+        # cross-run cache: if an installed node_modules for this exact
+        # dependency state (lockfile hash) is cached AND it already passed
+        # smoke, restore it and skip install+build+smoke entirely. The repo
+        # SOURCE is always freshly copied above, so a cached dep tree only
+        # ever pairs with fresh code — no stale-code review risk. Fail SAFE:
+        # any cache miss/error falls through to the normal install path.
+        cache_hit = False
+        fp: str | None = None
+        if _warm_cache_enabled() and self.profile.install_cmd:
+            fp = _dep_fingerprint(
+                self.repo_root, self.project_dir, self.profile.install_cmd)
+            if fp:
+                cdir = os.path.join(_warm_cache_root(), fp)
+                cached_nm = os.path.join(cdir, "node_modules")
+                smoke_ok = os.path.join(cdir, "smoke.ok")
+                if os.path.isdir(cached_nm) and os.path.isfile(smoke_ok):
+                    dest_nm = os.path.join(self._workdir(repo), "node_modules")
+                    try:
+                        t0 = time.monotonic()
+                        # copy the cached tree in (copy, not symlink: the
+                        # sandbox mount + writes during the run must not
+                        # mutate the shared cache).
+                        shutil.copytree(cached_nm, dest_nm, symlinks=True)
+                        phases.append(
+                            f"cache-restore {time.monotonic() - t0:.1f}s "
+                            f"(skipped install+smoke)")
+                        cache_hit = True
+                    except (OSError, shutil.Error):
+                        # restore failed -> fall through to normal install
+                        shutil.rmtree(dest_nm, ignore_errors=True)
+                        cache_hit = False
+        if not cache_hit and self.profile.install_cmd:
             t0 = time.monotonic()
             try:
                 inst = self._run(self.profile.install_cmd, self._workdir(repo))
@@ -310,7 +403,7 @@ class FindingVerifier:
                     self._prep_error = f"install failed: {_proc_tail(inst)}"
             except subprocess.TimeoutExpired:
                 self._prep_error = f"install did not finish within {self.timeout}s"
-        if not self._prep_error and self.profile.build_cmd:
+        if not cache_hit and not self._prep_error and self.profile.build_cmd:
             t0 = time.monotonic()
             try:
                 bld = self._run(self.profile.build_cmd, self._workdir(repo))
@@ -322,7 +415,8 @@ class FindingVerifier:
         # functional smoke probe: prove the runner starts before judging
         # anything. An exit code can lie across toolchain versions; a probe
         # that actually launches the runner cannot.
-        if not self._prep_error and getattr(self.profile, "smoke_cmd", None):
+        if (not cache_hit and not self._prep_error
+                and getattr(self.profile, "smoke_cmd", None)):
             t0 = time.monotonic()
             probe = getattr(self.profile, "smoke_probe", None)
             probe_path = ""
@@ -345,6 +439,32 @@ class FindingVerifier:
             finally:
                 if probe_path and os.path.exists(probe_path):
                     os.remove(probe_path)
+        # populate the cross-run cache: a fresh install that passed smoke is
+        # exactly what the next run of this dep state wants. Only when we did
+        # NOT hit the cache, there's no prep error, and we have a fingerprint.
+        # Best-effort: a cache-write failure never affects this run.
+        if (_warm_cache_enabled() and not cache_hit and not self._prep_error
+                and fp and self.profile.install_cmd):
+            src_nm = os.path.join(self._workdir(repo), "node_modules")
+            if os.path.isdir(src_nm):
+                cdir = os.path.join(_warm_cache_root(), fp)
+                try:
+                    os.makedirs(cdir, exist_ok=True)
+                    tmp_nm = cdir + ".tmp-node_modules"
+                    shutil.rmtree(tmp_nm, ignore_errors=True)
+                    shutil.copytree(src_nm, tmp_nm, symlinks=True)
+                    final_nm = os.path.join(cdir, "node_modules")
+                    shutil.rmtree(final_nm, ignore_errors=True)
+                    os.replace(tmp_nm, final_nm)
+                    # smoke marker written LAST: a restore requires both, so a
+                    # half-written cache (node_modules present, marker absent)
+                    # is never served.
+                    with open(os.path.join(cdir, "smoke.ok"), "w") as mf:
+                        mf.write(fp)
+                    self.log("  warm base: cached deps for reuse "
+                             f"(key {fp})")
+                except (OSError, shutil.Error):
+                    pass  # cache is best-effort; never break the run
         self.log("  warm base: " + ", ".join(phases))
         self._warm_repo = repo
 
