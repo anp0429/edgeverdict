@@ -83,10 +83,25 @@ def test_syntax_error_returns_empty_no_raise(tmp_path):
     assert behavior_surface(d, "bad.py") == ""
 
 
-def test_non_python_returns_empty(tmp_path):
+def test_unsupported_language_returns_empty(tmp_path):
+    # a language the tool has no surface for (not .py, not .ts/.js) -> "".
+    # NOTE: .ts/.js now route to ts_behavior_surface (see
+    # test_ts_behavior_surface); this pins the genuine no-surface case.
     d = str(tmp_path)
-    _w(d, "a.ts", "const x = 1\n")
-    assert behavior_surface(d, "a.ts") == ""
+    _w(d, "a.rb", "X = 1\n")
+    assert behavior_surface(d, "a.rb") == ""
+    _w(d, "a.go", "const X = 1\n")
+    assert behavior_surface(d, "a.go") == ""
+
+
+def test_ts_target_routes_to_ts_surface(tmp_path):
+    # the Python behavior_surface must delegate a .ts target, not return "".
+    d = str(tmp_path)
+    _w(d, "a.ts", 'export const NONE_ALLOWED = ["is_not"];\n'
+                  "export function f(): boolean { return true; }\n")
+    out = behavior_surface(d, "a.ts")
+    assert "NONE_ALLOWED" in out
+    assert "VISIBLE BEHAVIOR" in out
 
 
 def test_empty_when_nothing_to_show(tmp_path):

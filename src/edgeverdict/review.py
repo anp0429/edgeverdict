@@ -9,12 +9,14 @@ loop did and why — the documented review IS the product, not just the fix.
 from __future__ import annotations
 
 import html
+import re
 from dataclasses import dataclass, field
 from typing import Literal
 
-Axis = Literal["correctness", "consistency"]
+Axis = Literal["correctness", "consistency", "coverage"]
 Status = Literal[
-    "skipped_covered", "handled", "confirmed_gap", "broken_test", "timed_out", "pending"
+    "skipped_covered", "handled", "confirmed_gap", "broken_test", "timed_out",
+    "untested_boundary", "pending"
 ]
 
 
@@ -174,6 +176,48 @@ _JUDGMENT_FAILURE_MARKERS = (
 )
 
 
+_WORDING_ASSERTION_MARKERS = (
+    "assertnotin", "assertin",
+    "not.tocontain", "tocontain",
+    "unexpectedly found in", "not found in",
+    "to contain", "not to contain",
+)
+_MESSAGE_HINT = ("message", "error", "log", "warning", "text", "please",
+                 "invalid", "verify")
+# SQL / query-language markers: an assertion on a string containing these is
+# checking QUERY CORRECTNESS (clause shape, escaping), not message wording. A
+# bug there is a real defect, so these strings are never tiered down as
+# wording preference. Learned on supabase/mcp #284: an ILIKE wildcard-escaping
+# gap was mis-tagged because `event_message`/`storage_logs` contain hint words.
+_QUERY_MARKERS = (
+    "select ", "insert ", "update ", "delete ", "where ", "from ",
+    "ilike", " like ", "join ", "order by", "group by", "values ",
+)
+
+
+def _is_wording_preference(observed: str) -> bool:
+    """True when the failing assertion is about the WORDING of a message
+    string, not a computed value — a specification-disagreement tell.
+    Negative string assertions (assertNotIn / not.toContain) on a message
+    frequently forbid a phrase the code legitimately includes.
+
+    Guards against two mis-tags:
+      - a value-membership check (assertIn on a list of ids) is not wording;
+      - a SQL / query string is a CORRECTNESS check, not message wording —
+        an escaping or clause bug there is a real defect (the #284 ILIKE
+        wildcard-escaping case), so query strings are excluded even though
+        column names like `event_message` contain message-hint words."""
+    low = (observed or "").lower()
+    body = low.split(":", 1)[1] if ":" in low else low
+    if not any(m in body for m in _WORDING_ASSERTION_MARKERS):
+        return False
+    # SQL / query context -> correctness, not wording. Exclude.
+    if any(kw in body for kw in _QUERY_MARKERS):
+        return False
+    has_prose = bool(re.search(r"['\"][^'\"]*\s+[^'\"]*['\"]", body))
+    return has_prose and any(h in body for h in _MESSAGE_HINT)
+
+
 def classify_gap_confidence(findings: list[ReviewFinding]) -> None:
     """Deterministic confidence tiering for confirmed gaps. Sets each gap's
     `confidence` to "high" or "low" and a one-line reason. NEVER changes
@@ -212,6 +256,19 @@ def classify_gap_confidence(findings: list[ReviewFinding]) -> None:
         # can't capture it. "DID NOT RAISE" / "not raised" are the exception:
         # a missing-raise is an objective contract break, not a value opinion.
         is_assertion = line.startswith(_ASSERTION_PREFIXES)
+        if _is_wording_preference(f.observed):
+            f.confidence = "low"
+            f.confidence_reason = (
+                "specification disagreement (message wording), not a defect: "
+                "the test asserts a phrase should appear in or be absent from "
+                "a human-readable message. Ask whether a user would observe "
+                "breakage if the wording stayed as the code has it — usually "
+                "not. Needs a contract (PR text, issue criteria, adjacent "
+                "test, or docs) to be a gap; otherwise a hypothesis"
+            )
+            if f.audit == "likely_false_positive":
+                f.confidence_reason += "; auditor: likely false positive"
+            continue
         # a vitest/jest matcher failure is a value mismatch even though it may
         # say "Error:" — check the whole first line, not just the prefix.
         is_js_matcher = any(m in line for m in _JS_MATCHER_MARKERS)
@@ -286,6 +343,7 @@ _STATUS_LABEL = {
     "handled": ("handled", "#1f7a4d", "#5dcaa5"),
     "skipped_covered": ("already covered", "#76756e", "#c9c8c2"),
     "broken_test": ("test didn't run", "#8a6d1b", "#e0c060"),
+    "untested_boundary": ("untested boundary — human call", "#8a6d1b", "#e0c060"),
     "timed_out": ("timed out — human call", "#5a5a8f", "#a9a9d6"),
     "pending": ("not yet run", "#76756e", "#c9c8c2"),
 }

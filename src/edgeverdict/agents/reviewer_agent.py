@@ -20,15 +20,16 @@ decides. No model certifies a gap.
 
 from __future__ import annotations
 
-from ..providers import chat_completion
-
 import ast
 import hashlib
 import json
 import os
 import re
 
+from ..providers import chat_completion
 from ..review import ReviewFinding
+from ..test_setup import setup_surface
+from ..ts_behavior import ts_behavior_surface
 from ..ts_surface import _ts_exports
 
 # Review axes bias WHICH cases the reviewer enumerates, injected as data so the
@@ -747,6 +748,9 @@ def behavior_surface(repo_root: str, target_rel: str,
     shapes what gets PROPOSED; verdicts are still earned by running.
     Failure posture: any trouble -> "" (a surface must never kill a run).
     Cap drop order: helpers first, then guards, never constants."""
+    if target_rel.endswith((".ts", ".mts", ".cts", ".tsx",
+                            ".js", ".mjs", ".cjs", ".jsx")):
+        return ts_behavior_surface(repo_root, target_rel, cap_chars=cap_chars)
     if not target_rel.endswith(".py"):
         return ""
     try:
@@ -1019,6 +1023,19 @@ class ReviewerAgent:
         sigs = signature_surface(self.repo_root, self.target_path)
         behavior = behavior_surface(self.repo_root, self.target_path,
                                     _changed_ranges(change))
+        # test-setup surface: the fixtures + boundary doubles the proposer can
+        # reuse. Fed with blast's test_importers so the conftest chain and mock
+        # idioms of EVERY test file that reaches the target are in scope, not
+        # just the one named by --tests.
+        extra_tests: list[str] = []
+        try:
+            from ..blast import compute_blast_detail
+            extra_tests = compute_blast_detail(
+                self.repo_root, self.target_path).test_importers
+        except Exception:  # noqa: BLE001 — advisory must never kill a run
+            extra_tests = []
+        setup = setup_surface(self.repo_root, self.target_path,
+                              self.existing_tests_path, extra_tests)
         scope = host_scope(self.existing_tests_path, tests)
         change_block = (
             f"WHAT THIS PR CHANGED (review THIS against the intent, not the whole file):\n"
@@ -1033,6 +1050,7 @@ class ReviewerAgent:
             + (f"\n\n{surface}" if surface else "")
             + (f"\n\n{sigs}" if sigs else "")
             + (f"\n\n{behavior}" if behavior else "")
+            + (f"\n\n{setup}" if setup else "")
             + (f"\n\n{scope}" if scope else "")
             + (f"\n\n{self._axis_directive}" if self._axis_directive else "")
         )

@@ -145,15 +145,154 @@ class BlastDetail:
     truncated: bool
 
 
-def compute_blast_detail(repo_root: str, target_rel: str) -> "BlastDetail":
+def _enclosing_defs_py(src: str, line_ranges: list[tuple[int, int]]) -> set[str]:
+    """The names of Python functions whose bodies overlap any of the given
+    (start, end) NEW-side line ranges. Resolved from the file's ast, so a
+    change deep in a method body attributes to that method even when the diff
+    hunk header only shows the enclosing class. This is the common bugfix
+    shape (edit inside a method), which pure hunk-header parsing misses."""
+    try:
+        tree = ast.parse(src)
+    except (SyntaxError, ValueError):
+        return set()
+    funcs: list[tuple[int, int, str]] = []
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            funcs.append((node.lineno, node.end_lineno or node.lineno,
+                          node.name))
+    out: set[str] = set()
+    for (lo, hi) in line_ranges:
+        # the most-nested function containing any line in [lo, hi]
+        best: tuple[int, str] | None = None
+        for (fl, fe, name) in funcs:
+            if fl <= hi and fe >= lo:  # overlap
+                if best is None or fl > best[0]:
+                    best = (fl, name)
+        if best:
+            out.add(best[1])
+    return out
+
+
+def _diff_files_and_ranges(change: str) -> dict[str, list[tuple[int, int]]]:
+    """Parse a unified diff into {new_path: [(new_start, new_end), ...]} from
+    the @@ hunk headers. NEW-side line numbers, so they index the post-change
+    file. Handles multi-file diffs (git diff over several files)."""
+    files: dict[str, list[tuple[int, int]]] = {}
+    cur: str | None = None
+    hunk_re = re.compile(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@")
+    for line in change.splitlines():
+        if line.startswith("+++ "):
+            path = line[4:].strip()
+            if path.startswith("b/"):
+                path = path[2:]
+            cur = None if path == "/dev/null" else path
+            continue
+        m = hunk_re.match(line)
+        if m and cur is not None:
+            start = int(m.group(1))
+            count = int(m.group(2)) if m.group(2) else 1
+            files.setdefault(cur, []).append((start, start + max(count, 1) - 1))
+    return files
+
+
+def changed_symbols_from_diff(change: str,
+                              repo_root: str | None = None,
+                              target_rel: str | None = None) -> set[str]:
+    """The function/method/const names whose bodies the diff adds or edits.
+    Used to make blast SYMBOL-aware: an importer inherits blast only if it
+    references one of these, not merely the changed file.
+
+    Two resolution paths, unioned:
+      1. In-hunk declarations: a `+def`/`+function`/`+const NAME = () =>` on an
+         added line (the diff edits the signature/declaration itself).
+      2. Enclosing-function resolution: for each changed NEW-side line range,
+         the function in the CURRENT target file that contains it (via ast).
+         This is what catches a change deep in a method body, where the hunk
+         header shows only the class — the common bugfix shape. Needs
+         repo_root + target_rel to read the file; without them, only path 1
+         runs (degraded, but never wrong).
+
+    Empty set -> caller falls back to file-level blast."""
+    if not change:
+        return set()
+    syms: set[str] = set()
+
+    # path 1: names DECLARED on added lines (signature/decl edits)
+    decl = re.compile(
+        r"^\+\s*(?:async\s+)?def\s+([A-Za-z_]\w*)"
+        r"|^\+\s*(?:export\s+)?(?:async\s+)?function\s+([A-Za-z_$][\w$]*)"
+        r"|^\+\s*(?:export\s+)?const\s+([A-Za-z_$][\w$]*)\s*(?::[^=]+)?=\s*"
+        r"(?:async\s*)?\([^)]*\)\s*(?::[^=]+)?=>")
+    # path 1b: enclosing def/function VISIBLE in the hunk (context or added
+    # line) — a repo-free catch for when the diff shows the signature above an
+    # edited body. Reset at each hunk boundary so a def from a prior hunk does
+    # not bleed across.
+    enclosing_ctx = re.compile(
+        r"^[+ ]\s*(?:async\s+)?def\s+([A-Za-z_]\w*)"
+        r"|^[+ ]\s*(?:export\s+)?(?:async\s+)?function\s+([A-Za-z_$][\w$]*)")
+    last_def: str | None = None
+    for line in change.splitlines():
+        if line.startswith("@@"):
+            last_def = None
+            continue
+        mc = enclosing_ctx.match(line)
+        if mc:
+            last_def = mc.group(1) or mc.group(2)
+        d = decl.match(line)
+        if d:
+            name = d.group(1) or d.group(2) or d.group(3)
+            if name:
+                syms.add(name)
+        elif (line.startswith("+") and not line.startswith("+++")
+              and last_def):
+            syms.add(last_def)
+
+    # path 2: enclosing function of each changed line range, resolved from the
+    # target file (Python only — needs an ast). Only for the target file.
+    if repo_root and target_rel and target_rel.endswith(_PY_EXT):
+        ranges_by_file = _diff_files_and_ranges(change)
+        # match the target whether the diff path is repo-relative or bare
+        tgt_norm = target_rel.replace(os.sep, "/")
+        ranges = ranges_by_file.get(tgt_norm)
+        if ranges is None:
+            for p, r in ranges_by_file.items():
+                if p.endswith(tgt_norm) or tgt_norm.endswith(p):
+                    ranges = r
+                    break
+        if ranges:
+            try:
+                with open(os.path.join(repo_root, target_rel),
+                          encoding="utf-8", errors="ignore") as fh:
+                    src = fh.read()
+                syms |= _enclosing_defs_py(src, ranges)
+            except OSError:
+                pass
+    return syms
+
+
+def _references_symbol(src: str, symbols: set[str]) -> bool:
+    """True when the source names one of the changed symbols as a called or
+    referenced identifier — not merely imports the file. Word-boundary match
+    so `load_feature_flags` does not match `load_feature_flags_v2`."""
+    for sym in symbols:
+        if sym and re.search(r"(?<![\w.])" + re.escape(sym) + r"\b", src):
+            return True
+    return False
+
+
+def compute_blast_detail(repo_root: str, target_rel: str,
+                         changed_symbols: "set[str] | None" = None
+                         ) -> "BlastDetail":
     """Same walk as compute_blast, but returns the importer SETS so the
     whiteboard can render the graph. One scan, no extra cost — compute_blast
     now delegates here and collapses the result to (tier, note)."""
     is_py = target_rel.endswith(_PY_EXT)
     candidates = _module_candidates(target_rel) if is_py else set()
+    symbols = changed_symbols or set()
 
     direct: set[str] = set()
     test_importers: set[str] = set()
+    reaching: set[str] = set()  # direct importers that reference a changed symbol
     scanned = 0
     truncated = False
     file_imports: dict[str, set[str]] = {}  # rel -> imported dotted names (py)
@@ -186,7 +325,12 @@ def compute_blast_detail(repo_root: str, target_rel: str) -> "BlastDetail":
             else:
                 hit = _imports_target_js(src, target_rel)
             if hit:
-                (test_importers if _is_test_path(rel) else direct).add(rel)
+                if _is_test_path(rel):
+                    test_importers.add(rel)
+                else:
+                    direct.add(rel)
+                    if symbols and _references_symbol(src, symbols):
+                        reaching.add(rel)
         if truncated:
             break
 
@@ -204,20 +348,49 @@ def compute_blast_detail(repo_root: str, target_rel: str) -> "BlastDetail":
                 transitive.add(rel)
 
     n_direct, n_trans, n_tests = len(direct), len(transitive), len(test_importers)
-    reach = n_direct + n_trans
-    if n_direct >= 5 or reach >= 10:
-        tier = "wide"
-    elif n_direct >= 1:
-        tier = "moderate"
-    else:
-        tier = "narrow"
 
-    examples = ", ".join(sorted(direct)[:3])
-    note = (f"{n_direct} direct importer(s)"
-            + (f" + {n_trans} one-hop" if n_trans else "")
-            + (f" ({n_tests} test file(s), counted separately)" if n_tests else "")
-            + (f" — e.g. {examples}" if examples else " — nothing in-repo imports it")
-            + (" [scan truncated at cap — counts are a lower bound]" if truncated else ""))
+    if symbols:
+        # tier from the SEMANTICALLY-REACHING count, not the file-import count:
+        # importing the file != exercising the changed symbol.
+        n_reach = len(reaching)
+        import_only = n_direct - n_reach
+        if n_reach >= 5:
+            tier = "wide"
+        elif n_reach >= 1:
+            tier = "moderate"
+        else:
+            tier = "narrow"  # nothing references the changed symbol → local
+        shown = ", ".join(sorted(reaching)[:3])
+        sym_list = ", ".join(sorted(s for s in symbols if s)[:3])
+        note = (
+            f"{n_reach} importer(s) reference the changed symbol"
+            + (f" ({sym_list})" if sym_list else "")
+            + (f" — e.g. {shown}" if shown else "")
+            + (f"; {import_only} more import the file but not the changed "
+               f"symbol" if import_only > 0 else "")
+            + (f"; {n_trans} one-hop" if n_trans else "")
+            + (f" ({n_tests} test file(s), counted separately)"
+               if n_tests else "")
+            + (" [scan truncated at cap — counts are a lower bound]"
+               if truncated else "")
+        )
+    else:
+        reach = n_direct + n_trans
+        if n_direct >= 5 or reach >= 10:
+            tier = "wide"
+        elif n_direct >= 1:
+            tier = "moderate"
+        else:
+            tier = "narrow"
+        examples = ", ".join(sorted(direct)[:3])
+        note = (f"{n_direct} direct importer(s)"
+                + (f" + {n_trans} one-hop" if n_trans else "")
+                + (f" ({n_tests} test file(s), counted separately)"
+                   if n_tests else "")
+                + (f" — e.g. {examples}" if examples
+                   else " — nothing in-repo imports it")
+                + (" [scan truncated at cap — counts are a lower bound]"
+                   if truncated else ""))
     return BlastDetail(
         tier=tier, note=note, target=tgt_norm,
         direct=sorted(direct), transitive=sorted(transitive),

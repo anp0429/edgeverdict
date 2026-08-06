@@ -28,9 +28,14 @@ from dataclasses import dataclass, field, fields
 
 from .agents.critic_agent import CriticAgent
 from .agents.gap_auditor import GapAuditor
-from .verifiers.assertion_lint import lint_test
-from .agents.test_repairer import MAX_REPAIRS, TestRepairer
 from .agents.reviewer_agent import ReviewerAgent, import_surface
+from .agents.test_repairer import MAX_REPAIRS, TestRepairer
+from .blast import (
+    BlastDetail,
+    changed_symbols_from_diff,
+    compute_blast_detail,
+    triage,
+)
 from .config import (
     ConfigError,
     build_profile,
@@ -44,7 +49,6 @@ from .config import (
 from .fingerprint import verdict_summary
 from .proposal_cache import propose_or_cached
 from .providers import endpoint_label
-from .blast import BlastDetail, compute_blast_detail, triage
 from .review import (
     ReviewFinding,
     ReviewRun,
@@ -52,6 +56,7 @@ from .review import (
     flag_systematic_artifacts,
     render_review_html,
 )
+from .verifiers.assertion_lint import lint_test
 from .verifiers.finding_verifier import FindingVerifier
 from .verifiers.harness import harness_for_profile, harness_for_target
 
@@ -459,13 +464,27 @@ def run_review(request: ReviewRequest, log=print) -> ReviewResult:
     # so the review board can render the blast pane; f.blast/f.blast_note
     # stay exactly as before (detail.tier/detail.note).
     _blast_cache: dict[str, BlastDetail | None] = {}
+    # symbol-aware blast: narrow importers to those referencing the changed
+    # functions, so a change to one function in a widely-imported file is not
+    # reported as system-wide (field critique on the #542 401 logging change).
+    # Extraction is per-target: the enclosing function of a deep-body change is
+    # resolved from the target file itself (repo + tgt), which the worktree /
+    # checkout has in its post-change form.
+    _sym_cache: dict[str, set[str]] = {}
     for f in run.findings:
         tgt = f.source_file or (pairs[0][0] if pairs else "")
         if not tgt:
             continue
         if tgt not in _blast_cache:
+            if tgt not in _sym_cache:
+                try:
+                    _sym_cache[tgt] = changed_symbols_from_diff(
+                        change, repo, tgt)
+                except Exception:  # noqa: BLE001 — advisory must not kill a run
+                    _sym_cache[tgt] = set()
             try:
-                _blast_cache[tgt] = compute_blast_detail(repo, tgt)
+                _blast_cache[tgt] = compute_blast_detail(
+                    repo, tgt, _sym_cache[tgt])
             except Exception as exc:  # noqa: BLE001 — advisory must not kill a run
                 _blast_cache[tgt] = None
                 f.blast, f.blast_note = "", f"blast radius unavailable: {exc}"
@@ -477,6 +496,26 @@ def run_review(request: ReviewRequest, log=print) -> ReviewResult:
     for tgt, detail in _blast_cache.items():
         if detail is not None and detail.tier:
             log(f"  [blast] {tgt}: {detail.tier} — {detail.note}")
+    # untested-boundary detection: a data-layer change with NO reaching test
+    # is itself a coverage gap (no infra needed to observe it). Conservative:
+    # fires only when the diff shows a boundary AND test_importers is empty.
+    # Advisory status "untested_boundary" — never counts as a confirmed_gap.
+    try:
+        from .untested_boundary import untested_boundary_finding
+        _ub_seen: set[str] = set()
+        for tgt, detail in _blast_cache.items():
+            if tgt in _ub_seen:
+                continue
+            _ub_seen.add(tgt)
+            tis = detail.test_importers if detail is not None else []
+            ub = untested_boundary_finding(change, tgt, tis)
+            if ub is not None:
+                ub.source_file = tgt
+                run.findings.append(ub)
+                log(f"  [untested-boundary] {tgt}: boundary change with no "
+                    f"reaching test — human call")
+    except Exception:  # noqa: BLE001 — advisory must never kill a run
+        pass
     _low = [f for f in run.findings
             if f.status == "confirmed_gap" and f.confidence == "low"]
     if _low:
