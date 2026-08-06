@@ -6,7 +6,6 @@ that reference a changed symbol, so a logging change to one function in a
 With no changed_symbols, behavior is exactly file-level (no regression)."""
 from __future__ import annotations
 
-import os
 
 from edgeverdict.blast import (
     _references_symbol,
