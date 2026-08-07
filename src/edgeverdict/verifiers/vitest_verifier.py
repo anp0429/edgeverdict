@@ -62,6 +62,11 @@ def scrubbed_env(profile_env: dict[str, str],
     if cache_root:
         env["npm_config_cache"] = os.path.join(cache_root, "npm-cache")
         env["npm_config_store_dir"] = os.path.join(cache_root, "pnpm-store")
+        # A warm cache may already hold the runner bootstrap (npx-fetched
+        # pnpm); prefer it over a registry round-trip. The gate phase has
+        # no network, so without this preference a cached bootstrap still
+        # pays npm's full EAI_AGAIN retry backoff before being used.
+        env["npm_config_prefer_offline"] = "true"
     return env
 
 

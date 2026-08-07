@@ -200,6 +200,68 @@ def _dep_fingerprint(repo_root: str, workdir_rel: str,
     return h.hexdigest()[:16]
 
 
+_ANSI_RE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
+
+
+_INIT_NOISE = ("TINI_SUBREAPER", "Tini is not running as PID 1",
+               "[WARN  tini", "[WARN tini")
+
+
+def _runner_tail(proc: "subprocess.CompletedProcess[str]", limit: int = 500) -> str:
+    """The last meaningful lines of a dead runner's output. stderr is
+    preferred (that's where config/boot errors go) but stdout is consulted
+    when stderr is empty -- the stream you drop is the stream holding the
+    cause. Container-init noise (tini's subreaper warning) is filtered
+    first: it is printed on every boot, so a stream holding only that
+    noise counts as empty and the other stream gets consulted. ANSI color
+    is stripped so boards stay readable."""
+    for stream in (proc.stderr, proc.stdout):
+        text = _ANSI_RE.sub("", stream or "").strip()
+        if not text:
+            continue
+        lines = [ln.strip() for ln in text.splitlines()
+                 if ln.strip() and not any(n in ln for n in _INIT_NOISE)]
+        if not lines:
+            continue
+        tail = " | ".join(lines[-6:])
+        return tail[-limit:]
+    return ""
+
+
+def _invalidate_cache_entry(fp: str) -> None:
+    """Remove one warm-cache entry wholesale. Best-effort: the entry is
+    already suspect, and a failed delete just means the next run retries."""
+    shutil.rmtree(os.path.join(_warm_cache_root(), fp), ignore_errors=True)
+
+
+def _project_smoke_marker(tests_file: str) -> str:
+    """Cache-entry filename vouching that THIS test project's runner boots.
+    Dependencies are a property of the lockfile; a booting runner is a
+    property of the test file's own project (vitest config, environment,
+    runner bootstrap). One dep tree can serve many projects, so smoke
+    markers are per-project: pg-meta's smoke pass must never vouch for
+    studio's (the exact over-share that hid studio's dead runner behind
+    twelve broken_tests instead of one pre-spend environment failure)."""
+    proj = os.path.dirname(tests_file) or "."
+    digest = hashlib.sha1(proj.encode()).hexdigest()[:12]
+    return f"smoke.{digest}.ok"
+
+
+def _nm_complete(cdir: str) -> bool:
+    """Evidence that a cached node_modules finished writing. deps.ok is the
+    modern marker; a legacy plain smoke.ok (written after the tree, pre
+    per-project markers) counts too, as does any per-project marker."""
+    if os.path.isfile(os.path.join(cdir, "deps.ok")):
+        return True
+    if os.path.isfile(os.path.join(cdir, "smoke.ok")):
+        return True
+    try:
+        return any(n.startswith("smoke.") and n.endswith(".ok")
+                   for n in os.listdir(cdir))
+    except OSError:
+        return False
+
+
 class FindingVerifier:
     def __init__(
         self,
@@ -331,7 +393,8 @@ class FindingVerifier:
         # SOURCE is always freshly copied above, so a cached dep tree only
         # ever pairs with fresh code — no stale-code review risk. Fail SAFE:
         # any cache miss/error falls through to the normal install path.
-        cache_hit = False
+        cache_hit = False       # deps restored (install skipped)
+        smoke_skip = False      # THIS project's smoke already vouched for
         fp: str | None = None
         if _warm_cache_enabled() and self.profile.install_cmd:
             fp = _dep_fingerprint(
@@ -339,8 +402,9 @@ class FindingVerifier:
             if fp:
                 cdir = os.path.join(_warm_cache_root(), fp)
                 cached_nm = os.path.join(cdir, "node_modules")
-                smoke_ok = os.path.join(cdir, "smoke.ok")
-                if os.path.isdir(cached_nm) and os.path.isfile(smoke_ok):
+                proj_marker = os.path.join(
+                    cdir, _project_smoke_marker(self.tests_file))
+                if os.path.isdir(cached_nm) and _nm_complete(cdir):
                     dest_nm = os.path.join(self._workdir(repo), "node_modules")
                     try:
                         t0 = time.monotonic()
@@ -348,97 +412,141 @@ class FindingVerifier:
                         # sandbox mount + writes during the run must not
                         # mutate the shared cache).
                         shutil.copytree(cached_nm, dest_nm, symlinks=True)
+                        # the runner BOOTSTRAP rides along: the gate phase
+                        # has no network by design, and profiles that launch
+                        # via a package-manager bootstrap (npx pnpm) resolve
+                        # it from these caches. node_modules without them is
+                        # a car without keys -- the exact gap that starved
+                        # studio's runner into 12 broken_tests at 74s of
+                        # npm retry backoff each.
+                        for extra in ("npm-cache", "pnpm-store"):
+                            src_x = os.path.join(cdir, extra)
+                            if os.path.isdir(src_x) and self._warm_root:
+                                dst_x = os.path.join(self._warm_root, extra)
+                                shutil.rmtree(dst_x, ignore_errors=True)
+                                shutil.copytree(src_x, dst_x, symlinks=True)
+                        smoke_skip = os.path.isfile(proj_marker)
                         phases.append(
                             f"cache-restore {time.monotonic() - t0:.1f}s "
-                            f"(skipped install+smoke)")
+                            + ("(skipped install+smoke)" if smoke_skip
+                               else "(skipped install; smoke runs: first "
+                                    "time this test project rides this "
+                                    "dep cache)"))
                         cache_hit = True
                     except (OSError, shutil.Error):
                         # restore failed -> fall through to normal install
                         shutil.rmtree(dest_nm, ignore_errors=True)
                         cache_hit = False
-        if not cache_hit and self.profile.install_cmd:
-            t0 = time.monotonic()
-            try:
-                inst = self._run(self.profile.install_cmd, self._workdir(repo))
-                retry = unfrozen_install(self.profile.install_cmd)
-                if inst.returncode != 0 and retry is not None:
-                    # stale lockfile, most likely — degrade to the permissive
-                    # install rather than benching the run, but say so out loud.
-                    self.log("  install: frozen lockfile install failed; "
-                             "retrying with --no-frozen-lockfile")
-                    inst = self._run(retry, self._workdir(repo))
-                fallback = getattr(self.profile, "install_fallback_cmd", None)
-                if (inst.returncode != 0 and fallback
-                        and fallback != self.profile.install_cmd):
-                    # the primary install carries heuristic host-file
-                    # supplements; a guessed package name must never bench
-                    # the run — degrade to declared deps only, out loud.
-                    self.log("  install: supplemented install failed; "
-                             "retrying with declared dependencies only")
-                    inst = self._run(fallback, self._workdir(repo))
-                # third rung: a pip BUILD-ISOLATION failure (fetching the
-                # [build-system] requires into pip's throwaway build env)
-                # fails on a fresh resample but not on a warm-cached base,
-                # so the same target flips to "environment failure" between
-                # runs. Detect the build-dep signature and retry with the
-                # build tools seeded + --no-build-isolation. Degrade out
-                # loud; never let a fragile build-env fetch zero the run.
-                tail = _proc_tail(inst)
-                build_iso_failed = inst.returncode != 0 and (
-                    "build dependencies" in tail
-                    or "getting requirements to build" in tail
-                    or "install build dependencies" in tail
-                )
-                nbi = no_build_isolation_install(self.profile.install_cmd)
-                seed = build_tool_seed_cmd(self.profile.install_cmd)
-                if build_iso_failed and nbi is not None and seed is not None:
-                    self.log("  install: build-isolation failed (fetching "
-                             "build deps); seeding setuptools+wheel and "
-                             "retrying with --no-build-isolation")
-                    seed_res = self._run(seed, self._workdir(repo))
-                    if seed_res.returncode == 0:
-                        inst = self._run(nbi, self._workdir(repo))
-                phases.append(f"install {time.monotonic() - t0:.1f}s")
-                if inst.returncode != 0:
-                    self._prep_error = f"install failed: {_proc_tail(inst)}"
-            except subprocess.TimeoutExpired:
-                self._prep_error = f"install did not finish within {self.timeout}s"
-        if not cache_hit and not self._prep_error and self.profile.build_cmd:
-            t0 = time.monotonic()
-            try:
-                bld = self._run(self.profile.build_cmd, self._workdir(repo))
-                phases.append(f"build {time.monotonic() - t0:.1f}s")
-                if bld.returncode != 0:
-                    self._prep_error = f"build failed: {_proc_tail(bld)}"
-            except subprocess.TimeoutExpired:
-                self._prep_error = f"build did not finish within {self.timeout}s"
-        # functional smoke probe: prove the runner starts before judging
-        # anything. An exit code can lie across toolchain versions; a probe
-        # that actually launches the runner cannot.
-        if (not cache_hit and not self._prep_error
-                and getattr(self.profile, "smoke_cmd", None)):
-            t0 = time.monotonic()
-            probe = getattr(self.profile, "smoke_probe", None)
-            probe_path = ""
-            if probe:
-                probe_path = os.path.join(self._workdir(repo), probe[0])
-                with open(probe_path, "w", encoding="utf-8") as pf:
-                    pf.write(probe[1])
-            try:
-                smoke = self._run(self.profile.smoke_cmd, self._workdir(repo))
-                phases.append(f"smoke {time.monotonic() - t0:.1f}s")
-                if smoke.returncode != 0:
-                    self._prep_error = (
-                        "environment smoke probe failed: "
-                        + _strip_pm_noise(_proc_tail(smoke))
+                        smoke_skip = False
+        healed = False
+        while True:
+            if not cache_hit and self.profile.install_cmd:
+                t0 = time.monotonic()
+                try:
+                    inst = self._run(self.profile.install_cmd, self._workdir(repo))
+                    retry = unfrozen_install(self.profile.install_cmd)
+                    if inst.returncode != 0 and retry is not None:
+                        # stale lockfile, most likely — degrade to the permissive
+                        # install rather than benching the run, but say so out loud.
+                        self.log("  install: frozen lockfile install failed; "
+                                 "retrying with --no-frozen-lockfile")
+                        inst = self._run(retry, self._workdir(repo))
+                    fallback = getattr(self.profile, "install_fallback_cmd", None)
+                    if (inst.returncode != 0 and fallback
+                            and fallback != self.profile.install_cmd):
+                        # the primary install carries heuristic host-file
+                        # supplements; a guessed package name must never bench
+                        # the run — degrade to declared deps only, out loud.
+                        self.log("  install: supplemented install failed; "
+                                 "retrying with declared dependencies only")
+                        inst = self._run(fallback, self._workdir(repo))
+                    # third rung: a pip BUILD-ISOLATION failure (fetching the
+                    # [build-system] requires into pip's throwaway build env)
+                    # fails on a fresh resample but not on a warm-cached base,
+                    # so the same target flips to "environment failure" between
+                    # runs. Detect the build-dep signature and retry with the
+                    # build tools seeded + --no-build-isolation. Degrade out
+                    # loud; never let a fragile build-env fetch zero the run.
+                    tail = _proc_tail(inst)
+                    build_iso_failed = inst.returncode != 0 and (
+                        "build dependencies" in tail
+                        or "getting requirements to build" in tail
+                        or "install build dependencies" in tail
                     )
-            except subprocess.TimeoutExpired:
-                self._prep_error = (
-                    f"environment smoke probe did not finish within {self.timeout}s"
-                )
-            finally:
-                if probe_path and os.path.exists(probe_path):
-                    os.remove(probe_path)
+                    nbi = no_build_isolation_install(self.profile.install_cmd)
+                    seed = build_tool_seed_cmd(self.profile.install_cmd)
+                    if build_iso_failed and nbi is not None and seed is not None:
+                        self.log("  install: build-isolation failed (fetching "
+                                 "build deps); seeding setuptools+wheel and "
+                                 "retrying with --no-build-isolation")
+                        seed_res = self._run(seed, self._workdir(repo))
+                        if seed_res.returncode == 0:
+                            inst = self._run(nbi, self._workdir(repo))
+                    phases.append(f"install {time.monotonic() - t0:.1f}s")
+                    if inst.returncode != 0:
+                        self._prep_error = f"install failed: {_proc_tail(inst)}"
+                except subprocess.TimeoutExpired:
+                    self._prep_error = f"install did not finish within {self.timeout}s"
+            if not cache_hit and not self._prep_error and self.profile.build_cmd:
+                t0 = time.monotonic()
+                try:
+                    bld = self._run(self.profile.build_cmd, self._workdir(repo))
+                    phases.append(f"build {time.monotonic() - t0:.1f}s")
+                    if bld.returncode != 0:
+                        self._prep_error = f"build failed: {_proc_tail(bld)}"
+                except subprocess.TimeoutExpired:
+                    self._prep_error = f"build did not finish within {self.timeout}s"
+            # functional smoke probe: prove the runner starts before judging
+            # anything. An exit code can lie across toolchain versions; a probe
+            # that actually launches the runner cannot.
+            if (not smoke_skip and not self._prep_error
+                    and getattr(self.profile, "smoke_cmd", None)):
+                t0 = time.monotonic()
+                probe = getattr(self.profile, "smoke_probe", None)
+                probe_path = ""
+                if probe:
+                    probe_path = os.path.join(self._workdir(repo), probe[0])
+                    with open(probe_path, "w", encoding="utf-8") as pf:
+                        pf.write(probe[1])
+                try:
+                    smoke = self._run(self.profile.smoke_cmd, self._workdir(repo))
+                    phases.append(f"smoke {time.monotonic() - t0:.1f}s")
+                    if smoke.returncode != 0:
+                        self._prep_error = (
+                            "environment smoke probe failed: "
+                            + _strip_pm_noise(_proc_tail(smoke))
+                        )
+                except subprocess.TimeoutExpired:
+                    self._prep_error = (
+                        f"environment smoke probe did not finish within {self.timeout}s"
+                    )
+                finally:
+                    if probe_path and os.path.exists(probe_path):
+                        os.remove(probe_path)
+            # -- self-healing cache -------------------------------------
+            # Smoke failing on a CACHE-RESTORED base indicts the cache, not
+            # the repo: the restored tree can predate what the runner needs
+            # (a legacy entry without the runner bootstrap starved studio's
+            # smoke on zero network). Invalidate the entry and retry ONCE
+            # with a fresh install -- which also re-caches the entry in the
+            # current format. A smoke failure on a fresh install is the
+            # repo's own truth and stands.
+            if (self._prep_error and cache_hit and not healed and fp
+                    and self.profile.install_cmd):
+                self.log("  warm base: smoke failed on a cache-restored "
+                         "base; invalidating cache entry " + fp
+                         + " and retrying with a fresh install")
+                _invalidate_cache_entry(fp)
+                shutil.rmtree(os.path.join(self._workdir(repo),
+                                           "node_modules"),
+                              ignore_errors=True)
+                cache_hit = False
+                smoke_skip = False
+                self._prep_error = ""
+                healed = True
+                phases.append("cache-invalidated (self-heal)")
+                continue
+            break
         # populate the cross-run cache: a fresh install that passed smoke is
         # exactly what the next run of this dep state wants. Only when we did
         # NOT hit the cache, there's no prep error, and we have a fingerprint.
@@ -456,15 +564,48 @@ class FindingVerifier:
                     final_nm = os.path.join(cdir, "node_modules")
                     shutil.rmtree(final_nm, ignore_errors=True)
                     os.replace(tmp_nm, final_nm)
-                    # smoke marker written LAST: a restore requires both, so a
-                    # half-written cache (node_modules present, marker absent)
-                    # is never served.
-                    with open(os.path.join(cdir, "smoke.ok"), "w") as mf:
+                    # the runner bootstrap rides along with the dep tree:
+                    # the install phase (the only networked phase) fetched
+                    # the package-manager bootstrap into the session caches;
+                    # persist them so a future cache-restore can launch the
+                    # runner with zero network.
+                    if self._warm_root:
+                        for extra in ("npm-cache", "pnpm-store"):
+                            src_x = os.path.join(self._warm_root, extra)
+                            if not os.path.isdir(src_x):
+                                continue
+                            tmp_x = cdir + ".tmp-" + extra
+                            shutil.rmtree(tmp_x, ignore_errors=True)
+                            shutil.copytree(src_x, tmp_x, symlinks=True)
+                            final_x = os.path.join(cdir, extra)
+                            shutil.rmtree(final_x, ignore_errors=True)
+                            os.replace(tmp_x, final_x)
+                    # deps.ok written after the tree, so a half-written
+                    # cache (node_modules present, marker absent) is never
+                    # served. Smoke markers are separate and per-project.
+                    with open(os.path.join(cdir, "deps.ok"), "w") as mf:
                         mf.write(fp)
                     self.log("  warm base: cached deps for reuse "
                              f"(key {fp})")
                 except (OSError, shutil.Error):
                     pass  # cache is best-effort; never break the run
+        # per-project smoke marker: written whenever smoke actually RAN and
+        # passed for this tests file's project -- on a fresh install AND on
+        # an nm-restored run whose project was riding this dep cache for
+        # the first time. One dep tree, many projects, each vouched
+        # individually.
+        if (_warm_cache_enabled() and not smoke_skip and not self._prep_error
+                and fp and self.profile.install_cmd
+                and getattr(self.profile, "smoke_cmd", None)):
+            cdir = os.path.join(_warm_cache_root(), fp)
+            if os.path.isdir(os.path.join(cdir, "node_modules")):
+                try:
+                    marker = os.path.join(
+                        cdir, _project_smoke_marker(self.tests_file))
+                    with open(marker, "w") as mf:
+                        mf.write(fp)
+                except OSError:
+                    pass  # best-effort
         self.log("  warm base: " + ", ".join(phases))
         self._warm_repo = repo
 
@@ -534,7 +675,7 @@ class FindingVerifier:
                 f.write(injected)
             out = self._fresh_result_path(repo)
             try:
-                self._run(
+                proc = self._run(
                     self.harness.serial_command(self.profile, self._cmd_tests_file,
                                                 serial_title, out,
                                                 is_parameterized=parameterized),
@@ -547,6 +688,14 @@ class FindingVerifier:
                 )
                 return finding
             finding.status, finding.observed = self.harness.read_verdict(out)
+            if finding.observed == "test run produced no JSON output":
+                # The runner died before reporting; its last words are the
+                # only diagnostic there is (cause-first: never suppress the
+                # stream holding the cause). Attach the tail so this reads
+                # as a cause, not a shrug.
+                tail = _runner_tail(proc)
+                if tail:
+                    finding.observed += "; runner said: " + tail
             return finding
         finally:
             # restore pristine so the base is clean for the next finding/run
