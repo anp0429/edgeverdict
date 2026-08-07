@@ -854,6 +854,54 @@ class FindingVerifier:
             done.add(i)
         return done
 
+
+    def _confirm_batch_gaps(self, review: "ReviewRun",
+                            leftover: set[int]) -> None:
+        """A confirmed_gap is a CLAIM, and batch mode can manufacture false
+        ones: all proposals share one test file, so module-level state
+        (persisted stores, singletons) leaks between tests and turns
+        pollution into failures. The supabase studio run made the cost
+        concrete -- 12 batch "gaps", 10 of them artifacts of a shared
+        valtio+localStorage store, 2 real.
+
+        So a gap found by BATCH must survive ISOLATION before keeping the
+        label: each is re-gated through the serial path (its own file, its
+        own run). Serial failure -> the gap stands, serially confirmed, with
+        the cleaner isolated observed. Serial pass -> the batch failure was
+        an artifact; the honest verdict is handled, and the note says so.
+        Gaps that already CAME from the serial fallback are already
+        isolated and are not re-run. Cost scales with gaps, which are rare
+        on healthy runs. EDGEVERDICT_SERIAL_CONFIRM=0 opts out.
+        """
+        if os.environ.get("EDGEVERDICT_SERIAL_CONFIRM", "1").strip() == "0":
+            return
+        idxs = [i for i, f in enumerate(review.findings)
+                if f.status == "confirmed_gap" and i not in leftover]
+        if not idxs:
+            return
+        t0 = time.monotonic()
+        survived = 0
+        artifacts = 0
+        for i in idxs:
+            f = review.findings[i]
+            batch_observed = f.observed
+            self.classify(f)
+            if f.status == "confirmed_gap":
+                survived += 1
+                f.observed = (f.observed or batch_observed or "")
+                f.observed += " [serially confirmed in isolation]"
+            else:
+                artifacts += 1
+                f.observed = (
+                    "passed in isolation; the batch failure was a shared-"
+                    "state artifact (all proposals run in one file), not a "
+                    "behavior of the change. Batch had observed: "
+                    + (batch_observed or "(none)"))
+        self.log(
+            f"  serial confirmation {time.monotonic() - t0:.1f}s: "
+            f"{len(idxs)} batch gap(s) re-gated in isolation — "
+            f"{survived} confirmed, {artifacts} batch artifact(s)")
+
     def run(self, review: ReviewRun, batch: bool = True) -> ReviewRun:
         """Classify all findings against one warm base. With batch=True the
         gate runs ONE test invocation and serial-fallbacks anything it could
@@ -892,6 +940,7 @@ class FindingVerifier:
                         if leftover else f", 0/{eligible} fell back"
                     )
                 )
+                self._confirm_batch_gaps(review, leftover)
             else:
                 for f in review.findings:
                     self.classify(f)
