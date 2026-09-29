@@ -1,4 +1,5 @@
 # EDGEVERDICT_SANDBOX_DOCKERFILE_V3_BUILDDEPS
+# EDGEVERDICT_SANDBOX_DOCKERFILE_V4_JQ: jq added for promises probes (shell repos lean on it)
 # Python version is a build arg so repos that pin requires-python (e.g.
 # PostHog's ==3.13.13) get a matching sandbox without editing this file:
 #   docker build -f docker/Dockerfile.sandbox \
@@ -18,7 +19,7 @@ ARG NODE_MAJOR=22
 # generic image without it fails installs one package at a time.
 ARG BUILD_DEPS="build-essential libpq-dev libxmlsec1 libxmlsec1-dev libffi-dev zlib1g-dev pkg-config"
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ca-certificates curl git gnupg tini ${BUILD_DEPS} \
+    && apt-get install -y --no-install-recommends ca-certificates curl git gnupg jq tini ${BUILD_DEPS} \
     && mkdir -p /etc/apt/keyrings \
     && curl -fsSL https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key \
        | gpg --dearmor -o /etc/apt/keyrings/nodesource.gpg \
