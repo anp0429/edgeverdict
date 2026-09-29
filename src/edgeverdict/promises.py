@@ -2,6 +2,7 @@
 
 sig EDGEVERDICT_PROMISES_V1
 sig EDGEVERDICT_PROMISES_V2 (reference-driven collection, must/attempt)
+sig EDGEVERDICT_PROMISES_V3 (verdict message capped at 500 chars)
 
 A README, a hooks guide, a CONTRIBUTING file all make behavioral claims:
 "safe to run twice", "never overwrites", "every draft gets the next
@@ -467,6 +468,10 @@ def classify(returncode: int | None, stdout: str, stderr: str,
                            ("missing", MARK_MISSING)):
             if line.startswith(mark):
                 last_kind, last_msg = kind, line[len(mark):].strip()
+    if len(last_msg) > 500:
+        # a probe that dumps a whole file into its message buries the
+        # verdict; the board keeps the probe, the line keeps the gist
+        last_msg = last_msg[:500] + f" ...[{len(last_msg) - 500} more chars]"
     if last_kind == "broken" and returncode == 1:
         return "confirmed_gap", last_msg or "promise broken"
     if last_kind == "held" and returncode == 0:

@@ -1,4 +1,5 @@
 """sig EDGEVERDICT_PROMISES_V2 (proposer failures stop cause-first)
+sig EDGEVERDICT_PROMISES_V3 (network mode and collection counts printed)
 
 `edgeverdict promises`: execute what the repo's own docs promise.
 
@@ -82,8 +83,17 @@ def promises(args, *, backend=None, agent=None) -> int:
             print("NOTHING TO PROVE: no documentation found, so the repo "
                   "makes no written promises to execute")
             return 0
-        print(f"promises: reading {len(text.docs)} doc(s) and "
-              f"{len(text.code)} script/source file(s) in {repo}")
+        from .agents.promise_agent import network_mode
+        net = network_mode()
+        print(f"promises: reading {len(text.docs)} doc(s), "
+              f"{len(text.code)} script/source file(s), "
+              f"{len(text.fixtures)} fixture(s), {len(text.tests)} test(s) "
+              f"in {repo}")
+        print("  network: " + ("ON for probes (EDGEVERDICT_SANDBOX_NETWORK="
+                               "all; trusted repos only)" if net == "all" else
+                               "off (probes run offline; set "
+                               "EDGEVERDICT_SANDBOX_NETWORK=all for a trusted "
+                               "repo whose scripts download deps)"))
         if agent is None:
             from .agents.promise_agent import PromiseAgent
             agent = PromiseAgent(model=args.model, max_promises=args.max)

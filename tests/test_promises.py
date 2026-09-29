@@ -461,3 +461,48 @@ def test_agent_prompt_carries_fixtures_and_tests(layered):
     PromiseAgent(client=client).propose(collect(layered))
     assert "FIXTURE examples/input.jsonl" in seen["user"]
     assert "EXISTING TEST tests/test_run.sh" in seen["user"]
+
+
+# ------------------------------------- V3: network-aware prompt, tool list
+
+@pytest.mark.parametrize("value,mode", [
+    ("all", "all"), ("ALL ", "all"), ("install", "none"), ("none", "none"),
+    ("", "none"),
+])
+def test_network_mode_only_all_opens_probes(value, mode):
+    from edgeverdict.agents.promise_agent import network_mode
+    assert network_mode({"EDGEVERDICT_SANDBOX_NETWORK": value}) == mode
+
+
+def test_prompt_matches_the_network_the_probe_will_get():
+    from edgeverdict.agents.promise_agent import system_prompt
+    off, on = system_prompt(8, "none"), system_prompt(8, "all")
+    assert "NO network" in off and "IS available" not in off
+    assert "IS available" in on and "NO network" not in on
+    for p in (off, on):
+        assert "yq (Mike Farah v4" in p and "shellcheck" in p and "uv" in p
+
+
+def test_verdict_message_is_capped(repo):
+    probe = 'must true\nbroken "$(printf "x%.0s" $(seq 1 3000))"\n'
+    status, observed = run_probe(_p(probe), repo, BACKEND)
+    assert status == "confirmed_gap"
+    assert len(observed) < 600 and "more chars" in observed
+
+
+def test_cli_prints_network_mode(repo, tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("EDGEVERDICT_SANDBOX_NETWORK", "all")
+    agent = PromiseAgent(client=_openai_client('{"promises": []}'))
+    promises_cmd(_args(repo, board=str(tmp_path / "b.html")),
+                 backend=BACKEND, agent=agent)
+    assert "network: ON for probes" in capsys.readouterr().out
+
+
+def test_sandbox_image_carries_the_promise_tools():
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    df = open(os.path.join(root, "docker", "Dockerfile.sandbox")).read()
+    for tool in (" shellcheck ", " zip ", " unzip ", " jq ", "pytest uv"):
+        assert tool in df, tool
+    # yq must be the checksum-pinned Go binary, never Debian's python yq
+    assert "mikefarah/yq/releases/download" in df and "sha256sum -c" in df
+    assert " yq " not in df.split("apt-get install")[1].split("\n")[0]

@@ -4,6 +4,7 @@ deterministic runner in edgeverdict.promises decides every verdict.
 
 sig EDGEVERDICT_PROMISES_V1
 sig EDGEVERDICT_PROMISES_V2 (must/attempt contract, fixtures + tests in context)
+sig EDGEVERDICT_PROMISES_V3 (network-aware prompt, sandbox tool inventory)
 """
 from __future__ import annotations
 
@@ -65,8 +66,8 @@ PROBE CONTRACT (the harness enforces it; violations are discarded):
 - It is a bash script BODY. The harness prelude already ran: the cwd is \
 $REPO, a private scratch copy of the repo (with its .git). $WORK is a \
 writable scratch dir next to it. HOME is set and git has a user configured.
-- NO network. If the scenario needs a git remote, create a local bare repo \
-under $WORK and add it as origin.
+{network_rule}
+- {tools_rule}
 - Declare required tools first: `need jq git` (the harness reports a missing \
 tool by name instead of guessing).
 - Run every command of the repo under test through a harness helper:
@@ -114,6 +115,40 @@ Return ONLY JSON:
 Propose at most {max_promises} promises, strongest first."""
 
 
+_NET_OFF = ("- NO network. If the scenario needs a git remote, create a local "
+            "bare repo under $WORK and add it as origin. Anything that must "
+            "download (uv run --script, npx, pip install) will fail: skip "
+            "promises that need it rather than probing them.")
+_NET_ON = ("- Network IS available (the operator marked this repo trusted). You "
+           "may install what a script declares it needs as SETUP, e.g. `uv run "
+           "--script` resolving its inline deps, `pip install --user -r "
+           "requirements.txt`, `npm ci`; guard setup with `|| exit 4`. Still "
+           "never call external services the promise is not about, and still "
+           "use a local bare repo for git remotes.")
+_TOOLS = ("The sandbox image has: bash, coreutils, git, curl, jq, yq (Mike "
+          "Farah v4 syntax), zip/unzip, shellcheck, python3 with pip and uv, "
+          "node 22 with npm and corepack (pnpm, yarn). Anything else: declare "
+          "it with `need` so a missing tool is reported by name.")
+
+
+def network_mode(environ=None) -> str:
+    """'all' only when the operator opened the network for every sandbox
+    command; 'install' still leaves probes offline (a probe is `bash
+    probe.sh`, never an install command), so it reads as off."""
+    import os
+    env = os.environ if environ is None else environ
+    return "all" if env.get("EDGEVERDICT_SANDBOX_NETWORK", "").strip().lower() \
+        == "all" else "none"
+
+
+def system_prompt(max_promises: int, network: str = "none") -> str:
+    return _SYSTEM.format(
+        max_promises=max_promises,
+        network_rule=_NET_ON if network == "all" else _NET_OFF,
+        tools_rule=_TOOLS,
+    )
+
+
 def _user_block(text: RepoText) -> str:
     parts = ["FILE TREE:\n" + "\n".join(text.tree)]
     for rel, body in text.docs.items():
@@ -132,7 +167,8 @@ def _user_block(text: RepoText) -> str:
 
 class PromiseAgent:
     def __init__(self, model: str = "gpt-5.5", client=None, base_url: str = "",
-                 max_promises: int = 8, log=print):
+                 max_promises: int = 8, log=print, network: str | None = None):
+        self.network = network if network is not None else network_mode()
         self.model = model
         self._client = client
         self.base_url = base_url
@@ -145,7 +181,7 @@ class PromiseAgent:
         return self._client
 
     def propose(self, text: RepoText) -> list[Promise]:
-        system = _SYSTEM.format(max_promises=self.max_promises)
+        system = system_prompt(self.max_promises, self.network)
         user = _user_block(text)
         client = self._client_lazy()
         if uses_anthropic(self.model):
