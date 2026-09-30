@@ -24,6 +24,8 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import tempfile
+from contextlib import suppress
 
 from .review import ReviewFinding
 
@@ -108,11 +110,27 @@ def load(key: str) -> list[ReviewFinding] | None:
 
 
 def save(key: str, findings: list[ReviewFinding]) -> None:
-    os.makedirs(cache_dir(), exist_ok=True)
+    """Publish a complete entry atomically; failed writes keep the old entry."""
+    directory = cache_dir()
+    os.makedirs(directory, exist_ok=True)
     rows = [{field: getattr(f, field) for field in _FIELDS} for f in findings]
-    path = os.path.join(cache_dir(), f"{key}.json")
-    with open(path, "w", encoding="utf-8") as fh:
-        json.dump({"version": _CACHE_VERSION, "findings": rows}, fh, indent=1)
+    path = os.path.join(directory, f"{key}.json")
+    temporary = None
+    try:
+        # Same directory keeps replace atomic. Unique names also keep concurrent
+        # writers from truncating one another's entries; last complete write wins.
+        with tempfile.NamedTemporaryFile(
+            mode="w", encoding="utf-8", dir=directory,
+            prefix=f".{key}.", suffix=".tmp", delete=False,
+        ) as fh:
+            temporary = fh.name
+            json.dump({"version": _CACHE_VERSION, "findings": rows}, fh, indent=1)
+        os.replace(temporary, path)
+    finally:
+        if temporary is not None:
+            # Cleanup must not mask the original write/publish failure.
+            with suppress(OSError):
+                os.unlink(temporary)
 
 
 def propose_or_cached(
@@ -162,6 +180,13 @@ def propose_or_cached(
         # ever retrying the model. Failures are not coverage; never cache them.
         log(f"  proposals: 0 behaviors sampled — not cached ({key[:12]})")
         return findings
-    save(key, findings)
-    log(f"  proposals: sampled fresh, cached as {key[:12]}")
+    try:
+        save(key, findings)
+    except OSError as exc:
+        # The cache saves model calls; it must not prevent already-sampled
+        # proposals from reaching the gate when storage is unavailable.
+        log(f"  proposals: cache write failed ({key[:12]}): {exc}; "
+            "continuing with fresh proposals")
+    else:
+        log(f"  proposals: sampled fresh, cached as {key[:12]}")
     return findings
