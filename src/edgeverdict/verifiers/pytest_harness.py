@@ -525,13 +525,14 @@ class PytestHarness(Harness):
     # so prose and quoted source never match) and pytest's longrepr
     # location tail ("test_s.py:5: AssertionError"), which is the ONLY
     # place a bare rewritten `assert` names AssertionError at all.
-    _EXC_LINE = re.compile(
-        r"^(?:E\s+)?"
-        r"([A-Za-z_][\w.]*(?:Error|Exception)|Failed|KeyboardInterrupt)"
-        r"(?::|$)")
+    # Exception names are arbitrary identifiers, not necessarily *Error or
+    # *Exception. Ignoring a final custom exception (e.g. InvalidInput) can
+    # leave a caught inner AssertionError as the apparent final exception
+    # and manufacture a confirmed gap from a crashed proposal.
+    _EXC_NAME = r"([A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*)"
+    _EXC_LINE = re.compile(r"^(?:E\s+)?" + _EXC_NAME + r"(?::|$)")
     _EXC_TAIL = re.compile(
-        r"^\S+:\d+:\s+"
-        r"([A-Za-z_][\w.]*(?:Error|Exception)|Failed|KeyboardInterrupt)$")
+        r"^.+:\d+:\s+" + _EXC_NAME + r"$")
 
     def failure_headline(self, fm: str) -> str:
         """The line a human needs FIRST: the exception actually raised
@@ -565,7 +566,9 @@ class PytestHarness(Harness):
         payload = ""
         for line in fm.splitlines():
             stripped = line.strip()
-            m = self._EXC_LINE.match(stripped) or self._EXC_TAIL.match(stripped)
+            # Prefer the location tail: a filename such as test_case.py is
+            # itself a valid dotted identifier, but is not the exception.
+            m = self._EXC_TAIL.match(stripped) or self._EXC_LINE.match(stripped)
             if m:
                 exc = m.group(1)
                 payload = stripped
