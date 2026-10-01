@@ -496,7 +496,27 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--fresh", action="store_true", help="resample proposals (ignore cache)")
     p.add_argument("--timeout", type=int, default=1800, help="per-gate timeout seconds")
 
+    # sig EDGEVERDICT_PROMISES_V1
+    pr = sub.add_parser("promises", help="execute what the repo's own docs "
+                        "promise (README, hooks guides): BROKEN, HELD, or "
+                        "STOPPED")
+    pr.add_argument("--repo", default=".", help="repo to check (default: cwd)")
+    pr.add_argument("--model", default="gpt-5.5",
+                    help="proposer model (claude-* uses ANTHROPIC_API_KEY)")
+    pr.add_argument("--max", type=int, default=8,
+                    help="most promises to propose (default 8)")
+    pr.add_argument("--probes", default="",
+                    help="replay a saved probes JSON instead of asking a "
+                         "model (every run saves one next to its board)")
+    pr.add_argument("--timeout", type=int, default=120,
+                    help="per-probe timeout seconds (default 120)")
+    pr.add_argument("--board", default="",
+                    help="output board path (default: system temp dir)")
+
     args = parser.parse_args(argv)
+    if args.command == "promises":
+        from .promises_cli import promises as _promises
+        return _promises(args)
     if args.command == "demo":
         return demo(fixed=args.fixed)
     if args.command == "sandbox-build":
