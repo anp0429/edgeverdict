@@ -13,6 +13,9 @@ from __future__ import annotations
 import json
 import os
 
+import pytest
+
+from edgeverdict import proposal_cache
 from edgeverdict.proposal_cache import load, propose_or_cached, proposal_key, save
 from edgeverdict.review import ReviewFinding
 
@@ -130,3 +133,80 @@ def test_empty_propose_is_never_cached(tmp_path, monkeypatch, capsys):
     healthy = _FakeReviewer()
     out2 = propose_or_cached(healthy, None, **args)
     assert healthy.calls == 1 and out2[0].behavior == "sampled #1"
+
+
+def test_unusable_cache_directory_keeps_fresh_proposals(tmp_path, monkeypatch, capsys):
+    """A cache configuration error must not discard already-sampled tests."""
+    cache_path = tmp_path / "not-a-directory"
+    cache_path.write_text("occupied", encoding="utf-8")
+    monkeypatch.setenv("EDGEVERDICT_CACHE_DIR", str(cache_path))
+    monkeypatch.delenv("EDGEVERDICT_FRESH", raising=False)
+    reviewer = _FakeReviewer()
+
+    findings = propose_or_cached(
+        reviewer, None, intent="i", change="c", source="s", tests="t",
+    )
+
+    assert reviewer.calls == 1
+    assert findings[0].behavior == "sampled #1"
+    assert findings[0].status == "pending"
+    output = capsys.readouterr().out
+    assert "cache write failed" in output
+    assert "cached as" not in output
+    assert cache_path.read_text(encoding="utf-8") == "occupied"
+
+
+@pytest.mark.parametrize("error", [PermissionError("read-only"), OSError("disk full")])
+def test_cache_write_error_keeps_fresh_proposals(tmp_path, monkeypatch, capsys, error):
+    monkeypatch.setenv("EDGEVERDICT_CACHE_DIR", str(tmp_path))
+
+    def fail_save(*args):
+        raise error
+
+    monkeypatch.setattr(proposal_cache, "save", fail_save)
+    reviewer = _FakeReviewer()
+    findings = propose_or_cached(
+        reviewer, None, intent="i", change="c", source="s", tests="t", fresh=True,
+    )
+
+    assert reviewer.calls == 1
+    assert findings[0].behavior == "sampled #1"
+    assert findings[0].status == "pending"
+    output = capsys.readouterr().out
+    assert "cache write failed" in output
+    assert "cached as" not in output
+
+
+def test_interrupted_write_preserves_previous_entry(tmp_path, monkeypatch):
+    monkeypatch.setenv("EDGEVERDICT_CACHE_DIR", str(tmp_path))
+    save("key", [ReviewFinding(behavior="previous")])
+
+    def partial_write(data, fh, **kwargs):
+        fh.write('{"findings": [')
+        fh.flush()
+        # Readers must still see the complete previous entry mid-write.
+        cached = load("key")
+        assert cached is not None and cached[0].behavior == "previous"
+        raise OSError("disk full")
+
+    monkeypatch.setattr(proposal_cache.json, "dump", partial_write)
+    with pytest.raises(OSError, match="disk full"):
+        save("key", [ReviewFinding(behavior="replacement")])
+
+    assert load("key")[0].behavior == "previous"
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["key.json"]
+
+
+def test_failed_publish_preserves_previous_entry_and_cleans_temp(tmp_path, monkeypatch):
+    monkeypatch.setenv("EDGEVERDICT_CACHE_DIR", str(tmp_path))
+    save("key", [ReviewFinding(behavior="previous")])
+
+    def fail_replace(source, destination):
+        raise PermissionError("cannot publish")
+
+    monkeypatch.setattr(proposal_cache.os, "replace", fail_replace)
+    with pytest.raises(PermissionError, match="cannot publish"):
+        save("key", [ReviewFinding(behavior="replacement")])
+
+    assert load("key")[0].behavior == "previous"
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["key.json"]
